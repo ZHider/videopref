@@ -1,157 +1,165 @@
-# PyAI — 个人视频喜好二分类器
+# videopref — 个人视频喜好二分类器
 
-轻量级、高度个性化的**视频喜好二分类器**。采用"人机协同"工作流：先自动化拆帧提取关键视觉片段 → 用户在文件系统中人工清洗低质帧 → 基于清洗后的帧序列进行特征提取与喜好预测。
+轻量级、本地的**视频喜好二分类器**。采用"人机协同"工作流：自动拆帧提取关键视觉片段 → 用户在文件系统中人工清洗低质帧 → 基于清洗后的帧序列进行特征提取与喜好预测，从大量视频中挑出你喜欢的。
 
-**核心架构**：冻结 **DINOv3** 骨干 + **Masked Attention Pooling** + 轻量 **MLP 分类头**，面向极少标注样本下的快速收敛与本地化部署。
+**核心架构**：冻结 **DINOv3 base** 骨干（768 维）+ **Masked Attention Pooling** + 轻量 **MLP 分类头**（仅约 1.5k 可训练参数），面向极少标注样本下的快速收敛与本地化部署。
+
+## 特性
+
+- **全流程 GUI 化**：Gradio 提供六 Tab——拆帧 / 标注 / 推理 / 批量推理 / 工具 / 训练，训练在后台线程运行、实时曲线，不阻塞界面。
+- **CLI 保留**：`train.py`、`infer_batch.py` 等命令行能力完整保留，可脚本化/批处理。
+- **三种抽帧模式**：`uniform`（时长自适应均匀，默认）、`keyframe`（只解 I 帧，快 ~10 倍）、`scene`（场景检测）。
+- **特征缓存 + 帧签名失效校验**：清洗/重拆帧后自动重提取，训练与推理严格一致、不重复计算。
+- **坏视频容错**：单个视频失败跳过不中断批次。
 
 ## 工作流
 
 ```
-视频路径列表(每行一个) ─▶ 🏷️ 标注Tab：一键拆帧 ─▶ frames/{video}/0001.jpg ...
-                               │ (逐视频看图，点 喜欢/不喜欢)
-                               ▼
-                         labels.json (导出)
-                               ▼
-                   训练(3.4) ─▶ Checkpoint ─▶ 🔍 推理Tab(3.5)
+拆帧 ─▶ 人工清洗(可选) ─▶ 标注 ─▶ 训练 ─▶ 推理
 ```
 
-拆帧与推理完全解耦，以 **`frames/` 文件夹结构作为两阶段间的唯一数据契约**。
-支持三种抽帧模式：**`uniform`**（时长自适应均匀，默认）、**`keyframe`**（只解 I 帧，快 ~10 倍，适合批量）、**`scene`**（场景检测）。
+```
+视频(文件/文件夹/路径列表) ─▶ 🎬 拆帧 Tab ─▶ frames/{视频名}/0001.jpg ...
+                                                    │ 人工清洗：删除低质帧(可选)
+                                                    ▼
+                              🏷️ 标注 Tab：对 frames/ 下已拆帧目录逐一看图点 喜欢/不喜欢
+                                                    ▼
+                                          导出 labels.json
+                                                    ▼
+                        训练(🎓 训练 Tab 或 CLI) ─▶ Checkpoint ─▶ 🔍 推理 / ⚡ 批量推理
+```
+
+拆帧与标注/训练/推理解耦，以 **`frames/` 文件夹结构 + `frames/_manifest.json`** 作为各阶段间的唯一数据契约。
 
 ## 目录结构
 
 ```
 .
-├── videopref/            # 主包
-│   ├── config.py         # 集中配置 / 数据契约常量
-│   ├── paths.py          # 路径解析、安全化命名、帧枚举
-│   ├── frames.py         # 3.1 拆帧（uniform/keyframe/scene + 分辨率上限 + 并行）
-│   ├── backbone.py       # 冻结 DINOv3 骨干加载
-│   ├── features.py       # 特征提取管线（[CLS] 逐帧特征）
-│   ├── model.py          # 模型类（MaskedAttentionPooling/分类头）+ Checkpoint 规范
-│   ├── augment.py        # 训练期数据增强
-│   ├── dataset.py        # 训练数据 + 特征缓存（含帧签名失效校验）
-│   ├── labeling.py       # 标注工作流（路径列表→拆帧→队列→labels.json）
-│   ├── batch_infer.py    # 批量抽帧+推理（成千上万个视频）
-│   ├── train.py          # 3.4 CLI 训练
-│   ├── inference.py      # 推理辅助
-│   └── gradio_app.py     # 3.5 Gradio 三 Tab（拆帧/标注/推理）
-├── train.py              # CLI 训练入口
-├── infer_batch.py        # 批量推理入口
-├── app.py                # Gradio 入口
+├── videopref/                # 主包
+│   ├── config.py             # 集中常量（路径 / 抽帧 / EXTRACT_* / VIDEO_EXTENSIONS）
+│   ├── paths.py              # 纯路径工具：sanitize、短哈希、帧/视频枚举
+│   ├── manifest.py           # video_path→帧目录名 契约：FramesNamer + frames_dir_for_video
+│   ├── ffmpeg.py             # ffmpeg 命令构建与解码执行（含新旧版本适配）
+│   ├── sampling.py           # 抽帧策略：uniform / keyframe / scene + 黑白过滤
+│   ├── frames.py             # 拆帧编排：extract_frames / extract_from_input
+│   ├── backbone.py           # 冻结 DINOv3 骨干加载
+│   ├── features.py           # 逐帧 [CLS] 特征提取
+│   ├── pipeline.py           # prefetch_map：CPU 预处理与 GPU 前向重叠
+│   ├── model.py              # 模型类 + Checkpoint 读写（weights_only=True）
+│   ├── augment.py            # 训练期数据增强
+│   ├── dataset.py            # 训练数据 + 特征缓存（帧签名失效校验）+ collate
+│   ├── labeling.py           # 标注队列构建 + 进度持久化 + 会话状态机
+│   ├── predictor.py          # Predictor：骨干+模型一次性加载（推理/批量推理复用）
+│   ├── batch_infer.py        # 批量推理 CLI
+│   ├── train.py              # 训练（CLI + 可回调，供 Gradio 复用）
+│   ├── inference.py          # 单视频推理
+│   └── gradio_app.py         # Gradio 六 Tab
+├── train.py                  # CLI 训练入口
+├── infer_batch.py            # CLI 批量推理入口
+├── app.py                    # Gradio 入口
+├── random_pick_videos.py     # CLI：随机选取视频（工具 Tab 复用）
+├── move_low_score_files.py   # CLI：按 CSV 移动低分文件（工具 Tab 复用）
 ├── scripts/
-│   ├── make_synthetic_data.py   # 合成测试数据
-│   └── smoke_backbone.py        # 骨干冒烟测试
-├── models/               # 下载的 DINOv3 权重
-├── frames/               # 拆帧输出 + 人工清洗工作区
-├── checkpoints/          # 训练产出
-└── features_cache/       # 训练特征缓存
+│   ├── make_synthetic_data.py    # 合成测试数据（暖色=喜欢 / 冷色=不喜欢）
+│   └── smoke_backbone.py         # 骨干冒烟测试
+├── models/                   # 下载的 DINOv3 权重
+├── frames/                   # 拆帧输出 + 人工清洗工作区
+├── checkpoints/              # 训练产出
+└── features_cache/           # 训练特征缓存
 ```
 
 ## 安装
 
+### 前置条件
+
+- **Python 3.11**（`uv` 会按仓库内 `.python-version` 自动选择）。
+- **ffmpeg / ffprobe**：拆帧/抽帧强依赖，二者都必须加入系统 PATH，否则报「未找到 ffmpeg」。
+  - Windows：从 [gyan.dev builds](https://www.gyan.dev/ffmpeg/builds/) 下载 `ffmpeg-release-full` 解压，把里面的 `bin` 目录加入 PATH（或复制其中的 `ffmpeg.exe`/`ffprobe.exe` 到 PATH 已有目录），重开终端。
+  - 验证：
+    ```bash
+    ffmpeg -version
+    ffprobe -version
+    ```
+    两个命令都能输出版本号即为就绪。
+- **GPU（可选）**：NVIDIA 显卡 + CUDA 可用时自动走 GPU（本项目 torch 走 cu128 源）；无 GPU 会回退 CPU，速度较慢。
+- **网络**：Windows 直连 HF 可能遇 SSL/GBK 问题，推荐用 ModelScope 下载骨干（见下节）。
+
+### 安装依赖
+
 ```bash
-uv sync                              # 安装 torch/torchvision/transformers/gradio 等
-uv pip install modelscope            # 模型下载工具（不影响 torch 锁）
+uv sync                              # 安装 torch(cu128)/transformers/gradio/modelscope 等
 ```
 
-## 下载 DINOv3 骨干（base）
+## DINOv3 骨干（自动下载）
 
-本项目默认骨干为 `facebook/dinov3-vitb16-pretrain-lvd1689m`（`feature_dim=768`）。
-模型是 HF gated，但可从 **ModelScope 镜像**直接下载（无需 HF 许可）：
+默认骨干为 `facebook/dinov3-vitb16-pretrain-lvd1689m`（`feature_dim=768`）。模型在 HF 为 gated，本项目改用 **ModelScope** 源（无需 HF 许可），且**首次运行时自动下载**：
+
+- 当 `models/dinov3-vitb16-pretrain-lvd1689m/` 下缺少 `config.json` 或 `*.safetensors` 时，`load_backbone`（拆帧后的训练/推理/批量推理首步）会自动从 ModelScope 下载权重到该目录。
+- 下载与 modelscope 缓存都落在项目文件夹内（`models/` 与 `.modelscope/`），**不会写入用户 HOME 目录**，也不依赖 HuggingFace。
+- 运行时加载始终 `local_files_only=True`（从本地加载，不联网 HF）。
+
+> 若改用其他尺寸，请同步修改 `videopref/config.py` 的 `DEFAULT_BACKBONE_ID` / `DEFAULT_FEATURE_DIM`，并保证 Checkpoint 中 `feature_dim` 与之匹配。
+
+## 快速上手（Gradio）
 
 ```bash
-python - <<'PY'
-import os
-os.environ["MODELSCOPE_CACHE"] = r"models"
-from modelscope import snapshot_download
-snapshot_download("facebook/dinov3-vitb16-pretrain-lvd1689m",
-                  local_dir=r"models/dinov3-vitb16-pretrain-lvd1689m",
-                  allow_patterns=["*.safetensors", "*.json"])
-PY
+python app.py
 ```
 
-> 若改用其他尺寸，请同步修改 `videopref/config.py` 中的 `DEFAULT_BACKBONE_ID` / `DEFAULT_FEATURE_DIM`，并保证 Checkpoint 中 `feature_dim` 与之匹配。
+浏览器打开 `http://127.0.0.1:7860`，即可使用六个 Tab：
 
-## 操作指南（预处理 → 训练 → 推理）
+| Tab | 作用 |
+|---|---|
+| 🎬 **拆帧** | 上传单个视频 / 填文件夹路径 / 粘贴路径列表 → 拆帧到 `frames/` |
+| 🏷️ **标注** | 标注 `frames/` 下已拆帧目录，逐一看图点 👍/👎，可续标、导出 `labels.json` |
+| 🔍 **推理** | 选一个帧目录 + Checkpoint → 输出 `like_probability` 与结构化 JSON |
+| ⚡ **批量推理** | 路径列表 + Checkpoint → 批量抽帧/预测 → 结果表 + CSV |
+| 🧰 **工具** | 随机选取视频 / 按 CSV 移动低分文件 |
+| 🎓 **训练** | 后台线程训练，实时曲线 + 日志，训练期间可切其他 Tab |
 
-### 阶段一：预处理（拆帧 + 标注）
+## 操作指南
 
-**目的**：把视频列表转成帧序列写入 `frames/{视频名}/`，并逐视频标注喜欢/不喜欢。
+### 阶段一：拆帧 + 清洗 + 标注
 
-**推荐：Gradio 标注工作流**（高效）：
+1. **拆帧**（「🎬 拆帧」Tab）：提供视频文件、文件夹或每行一个的路径列表，选择抽帧模式与参数，点「开始拆帧」。输出到 `frames/{视频名}/0001.jpg...`。
+2. **人工清洗（可选）**：打开 `frames/{视频名}/`，直接删除低质/无关帧（过曝、花屏、遮挡）。保留帧即训练输入；特征缓存带**帧签名校验**，清洗后自动重提取。
+3. **标注**（「🏷️ 标注」Tab）：
+   - 点「**标注 frames/ 全部已拆帧视频**」载入 `frames/` 下所有已拆帧目录；或点「**继续上次标注**」续标（进度存于 `data/label_progress.json`）。
+   - 逐视频看图，点 **👍 喜欢 / 👎 不喜欢 / 跳过 / 上一步**。
+   - 预览框的「每行预览数」与「预览高度」可用滑条实时调整。
+   - 全部标完点「**导出 labels.json**」（label: 1=喜欢, 0=不喜欢）。
 
-1. `python app.py` → 「🏷️ 标注」Tab。
-2. 在"视频路径列表"文本框粘贴**每行一个视频路径**（100~200 个都没问题）。
-3. 抽帧参数保持默认（uniform 时长自适应，0.5 帧/秒，min 6 / max 64）。
-4. 点 **「一键拆帧并开始标注」** → 逐视频展示帧图 → 点 **👍 喜欢 / 👎 不喜欢 / 跳过**。
-5. 中途可关闭，下次点 **「继续上次标注」** 续标（进度存于 `data/label_progress.json`）。
-6. 全部标完点 **「导出 labels.json」**（label: 1=喜欢, 0=不喜欢）。
+> 标注只针对已拆帧目录，不再负责拆帧；拆帧统一走「🎬 拆帧」Tab 或 `extract_from_input`（见下）。
 
-**CLI 拆帧**（单视频或文件夹，不标注）：
+**CLI 拆帧**（单视频或文件夹）：
 
 ```bash
-# 单个视频
-python -c "from pathlib import Path; from videopref.frames import extract_from_input; from videopref import config; print(extract_from_input(Path('path/to/video.mp4'), Path(config.FRAMES_ROOT)))"
-
-# 整个视频文件夹（会为其中每个视频各建一个 frames 子目录）
 python -c "from pathlib import Path; from videopref.frames import extract_from_input; from videopref import config; print(extract_from_input(Path('path/to/videos_dir'), Path(config.FRAMES_ROOT)))"
 ```
 
-**人工清洗（可选）**：打开 `frames/{视频名}/`，在文件管理器中**直接删除**低质/无关帧（过曝、花屏、遮挡）。保留的帧即训练输入；训练时特征缓存带**帧签名校验**，清洗后自动重新提取，不会用到过期特征。
-
-> 抽帧默认：`uniform` 时长自适应（`n = clip(时长×0.5, 6, 64)`）、纯黑 `<10`、纯白 `>245`；可在 Gradio「抽帧参数」或 `videopref/config.py` 调整。
-> **`keyframe` 模式（推荐批量/大规模）**：`-skip_frame nokey` 只解码关键帧(I 帧)，比全量解码**快 ~10 倍、CPU 骤降**，代价是帧间隔不完全均匀（够"整体观感"分类用）；关键帧过少时自动回退均匀采样。
-> 抽帧输出宽度上限默认 640（`EXTRACT_MAX_WIDTH`，对 224 特征无损，省 CPU/磁盘）。
-
-**同名视频自动去重**：批量拆帧时，若不同目录下的视频同名（如 `A/movie.mp4` 与 `B/movie.mp4`），后一个会自动在目录名加路径短哈希（`movie` 与 `movie_abc11a06`），避免帧目录冲突。映射关系写入 `frames/_manifest.json`（`video_path → 帧目录名`），训练/推理解析帧目录时读取它，保证指向正确；同一视频重复拆帧幂等复用原目录。
-
-## 抽帧策略与性能优化
-
-三种抽帧模式（`--sampling` / Gradio「抽帧参数」）：
-
-| 模式 | 逻辑 | 速度 |
-|---|---|---|
-| `uniform`（默认） | 时长自适应：`n = clip(round(时长×fps_target), min, max)`，用 `fps` 滤镜按时间均匀抽样 | 中等（全量解码） |
-| **`keyframe`**（推荐批量） | `-skip_frame nokey` **只解码 I 帧**，跳过所有 P/B 帧 | **快 ~10 倍、CPU 骤降** |
-| `scene` | ffmpeg 场景变化检测（`gt(scene,阈值)`），按内容突变抽帧 | 中等 |
-
-**关键帧模式细节**：
-- 先抽出全部 I 帧；若超过 `max_frames` 则**按序号均匀抽 `max_frames` 帧**（铺满全程，不再只取开头）；若不足 `min_frames` 则回退 `uniform` 均匀时间采样（保证帧数够）。
-- 关键帧密度由视频编码器的 GOP 决定：典型 H.264/H.265 视频关键帧较密 → 很快；极稀疏关键帧的视频会触发回退（变慢，属保质量的兜底）。
-
-**其它性能/一致性优化**：
-- **流水线预取（prefetch）**：特征提取时，CPU 预处理（解码/缩放/归一化）在后台线程进行，与 GPU 前向重叠（有界队列背压），避免 GPU 空等 CPU。实测约 **2x 提速**。单视频帧数 > batch_size 时效果最明显，故批量推理默认 `--batch-size 16`。
-- **输出分辨率上限** `EXTRACT_MAX_WIDTH=640`（DINOv3 只需 224，对分类无损，显著降低 JPEG 编码 CPU 与磁盘）。
-- **并行抽帧** `--workers`（默认 4，ffmpeg 子进程并行）。
-- **均匀封顶**：超过 `max_frames` 时按序号均匀抽取（`_uniform_sample_list`），避免只取视频开头。
-- **递归扫描**：输入文件夹时递归扫描所有子目录（`recursive=True`，Gradio 可开关）。
-- 自动剔除纯黑（灰度均值<10）/纯白（>245）帧。
-- 兼容新旧 ffmpeg：`-vsync` 与 `-fps_mode` 自动适配。
-
-> 建议批量大规模用 `--sampling keyframe --min-frames 4 --max-frames 32`，又快又省。
+**同名视频自动去重**：不同目录下同名视频会在目录名加路径短哈希（`movie` / `movie_abc11a06`），映射写入 `frames/_manifest.json`（`video_path → 帧目录名`），训练/推理据此定位帧目录；同一视频重复拆帧幂等复用原目录。
 
 ### 阶段二：训练
 
 **目的**：用清洗后的帧 + 标注训练池化层与分类头（骨干冻结），产出 Checkpoint。
+
+**Gradio（推荐）**：「🎓 训练」Tab → 填 `labels.json` 路径、缓存/输出目录、epochs/lr/seed 等 → 点「开始训练」。后台线程执行，训练期间可切换其他 Tab，实时查看 loss/auc 曲线与日志。
+
+**CLI**：
 
 ```bash
 python train.py --data data/labels.json --cache-dir features_cache \
     --output-dir checkpoints --epochs 100 --lr 1e-3 --seed 42
 ```
 
-- `labels.json` 形如 `[{"video_path": "D:/videos/a.mp4", "label": 1}, ...]`；`video_path` 的 **stem（不含扩展名）必须与 `frames/` 下的子目录名一致**，否则训练会跳过该视频。
-- 首次运行会提取逐帧特征并缓存到 `features_cache/`；之后复用缓存，不重复计算。
-- 可选：`--augment`（训练期数据增强）、`--val-fraction`、`--batch-size`、`--log-dir`（tensorboard）、`--wandb`、`--threads`（限制 torch CPU 线程数，默认 8，降低 CPU 占用）。
-- 输出：`checkpoints/model.ckpt`（最佳）与 `checkpoints/final_epoch{epochs}.ckpt`。
+- `labels.json` 形如 `[{"video_path": "D:/videos/a.mp4", "label": 1}, ...]`；`video_path` 的 stem 与 `frames/` 子目录名对应（经 manifest 解析）。
+- 首次运行会提取逐帧特征并缓存到 `features_cache/`，之后复用缓存不重复计算。
+- 可选：`--augment`（训练期数据增强）、`--val-fraction`、`--batch-size`、`--threads`（CPU 线程上限，降占用）、`--log-dir`（tensorboard）、`--wandb`、`--device`、`--backbone-dir`。
+- 输出：`checkpoints/model.ckpt`（按 `(val_auc, -val_loss)` 择优）与 `checkpoints/final_epoch{epochs}.ckpt`。
 
 ### 阶段三：推理
 
-**目的**：对某个清洗后的帧目录输出喜好概率 `like_probability`。
-
-**Gradio 方式（推荐）**：`python app.py` → 「🔍 推理」Tab → 在下拉框选一个 `frames/` 子目录和 Checkpoint → 开始推理。输出 `like_probability` 与 JSON 结构化结果（含 num_frames、config、training_stats）。
-
-**CLI/脚本方式**：
+**单视频**：「🔍 推理」Tab 选帧目录 + Checkpoint → `like_probability`；或脚本：
 
 ```bash
 python - <<'PY'
@@ -162,68 +170,45 @@ print(r["like_probability"])
 PY
 ```
 
-> 推理端无状态：每次调用实时加载骨干 + Checkpoint、提取帧特征并预测；超参数全部来自 Checkpoint，不硬编码。
-
-### 批量推理（成千上万个视频）
-
-对成百上千个视频批量抽帧 + 预测，**骨干与 Checkpoint 只加载一次**，并复用特征缓存：
+**批量（大量视频）**：「⚡ 批量推理」Tab 粘贴路径列表 + 选 Checkpoint；或 CLI：
 
 ```bash
 python infer_batch.py --videos data/video_list.txt --checkpoint checkpoints/model.ckpt \
     --output predictions.csv --sampling keyframe --min-frames 4 --max-frames 32 --workers 4
 ```
 
-- `--videos`：`.txt`（每行一个视频路径）或视频文件夹（**递归扫描所有子目录**）；缺帧视频自动补抽（默认 `keyframe`）。
-- 输出 `predictions.csv`（utf-8-sig，Excel 直接打开），**三列：文件名、喜好概率、文件全路径**（失败/无帧的视频概率留空）。
-- **进度条**：加载骨干 / 抽帧 / 推理三个阶段均有 tqdm 进度。
-- **容错**：单个视频损坏/失败只跳过并记录（`[warn] 拆帧失败`），不中断整批；结束打印失败数量与前 10 个原因。
-- 特征缓存在 `features_cache/`（带帧签名校验），重复运行不重复提取。
-- 其他参数：`--min-frames`（默认 4）、`--max-frames`（默认 32）、`--workers`、`--max-width`、`--batch-size`（默认 16，配合预取）、`--threads`（torch CPU 线程上限，默认 8，降低 CPU 占用）、`--limit`（只测前 N 个）。
+- `--videos`：`.txt`（每行一个路径）或文件夹（递归扫描）；缺帧视频自动补抽。
+- 输出 `predictions.csv`（utf-8-sig）：**文件名、喜好概率、文件全路径**（失败/无帧概率留空）。
+- 骨干与 Checkpoint 只加载一次；特征缓存带帧签名校验，重跑不重复提取。
+- 容错：单视频失败跳过不中断整批，结束汇报失败数量与原因。
 
----
+### 工具（🧰 工具 Tab / 独立 CLI）
 
-## 快速上手（合成数据端到端）
+**随机选取视频**：
 
 ```bash
-# 1) 生成 24 条合成视频 + 标注
-python scripts/make_synthetic_data.py --n-like 12 --n-dislike 12 \
-    --videos data/synthetic_videos --labels data/labels.json
-
-# 2) 拆帧（等价于 Gradio「🎬 拆帧」Tab）
-python -c "from pathlib import Path; from videopref.frames import extract_from_input; from videopref import config; print(extract_from_input(Path('data/synthetic_videos'), Path(config.FRAMES_ROOT)))"
-
-# 3) 训练
-python train.py --data data/labels.json --cache-dir features_cache \
-    --output-dir checkpoints --epochs 100 --lr 1e-3 --seed 42
-
-# 4) Gradio 推理/拆帧
-python app.py
+python random_pick_videos.py <src_dir> [-n COUNT] [--seed S] [--no-recursive] [-o FILE]
 ```
 
-## 命令行训练
+**按 CSV 移动低分文件**（三列：`文件名,喜好分数,文件全路径`，低于阈值移动）：
 
-```
-python train.py --data labels.json --cache-dir ./features_cache \
-    --output-dir ./checkpoints --epochs 100 --lr 1e-3 --seed 42
-```
-
-可选参数：`--batch-size`、`--val-fraction`、`--augment`（训练期数据增强）、
-`--log-dir`（tensorboard）、`--wandb`、`--device`、`--backbone-dir`、`--threads`（CPU 线程上限，降占用）。
-
-## 标注格式
-
-```json
-[
-  {"video_path": "path/to/video1.mp4", "label": 1},
-  {"video_path": "path/to/video2.mp4", "label": 0}
-]
+```bash
+python move_low_score_files.py <csv> [-d 目标文件夹] [-t 阈值] [--dry-run]
 ```
 
-训练前请先在文件系统中核查并删除低质帧；`label` 取值 `0`(dislike) / `1`(like)。
+## 抽帧策略
+
+| 模式 | 逻辑 | 速度 |
+|---|---|---|
+| `uniform`（默认） | 时长自适应：`n = clip(round(时长×fps_target), min, max)`，`fps` 滤镜按时间均匀抽样 | 中等（全量解码） |
+| `keyframe`（推荐批量） | `-skip_frame nokey` 只解 I 帧 | **快 ~10 倍、CPU 骤降** |
+| `scene` | ffmpeg 场景检测（`gt(scene,阈值)`） | 中等 |
+
+其他：输出宽度上限默认 640、自动剔除纯黑(<10)/纯白(>245)帧、并行拆帧 `--workers`、均匀封顶到 `max_frames`、递归扫描子目录、ffmpeg `-vsync`/`-fps_mode` 自动适配。
 
 ## Checkpoint 规范
 
-Gradio 推理端所有超参数从 Checkpoint 读取，禁止硬编码：
+推理端所有超参数从 Checkpoint 读取，禁止硬编码：
 
 ```json
 {
@@ -234,28 +219,36 @@ Gradio 推理端所有超参数从 Checkpoint 读取，禁止硬编码：
 }
 ```
 
-## 工程约束
+## 快速上手（合成数据端到端）
 
-- 除 DINOv3 骨干外，池化层 + 分类头参数量极小（约 1.5k），便于快速保存/加载。
-- 全程 `pathlib.Path`，禁止字符串拼接路径。
-- Gradio 推理端无会话状态、不缓存特征、不存储中间结果。
-- 训练期数据增强不影响缓存的特征向量。
+```bash
+# 1) 生成 24 条合成视频 + 标注
+python scripts/make_synthetic_data.py --n-like 12 --n-dislike 12 \
+    --videos data/synthetic_videos --labels data/labels.json
 
-## 工程健壮性（历次修复）
+# 2) 拆帧
+python -c "from pathlib import Path; from videopref.frames import extract_from_input; from videopref import config; print(extract_from_input(Path('data/synthetic_videos'), Path(config.FRAMES_ROOT)))"
 
-- **中文路径/元数据不崩溃**：ffmpeg 子进程统一用 `utf-8 + errors="replace"` 解码输出，规避 Windows GBK `UnicodeDecodeError`；错误消息对 `res.stderr` 判空。
-- **坏视频不中断批次**：`extract_from_input` 单视频失败只 `[warn]` 跳过并继续；`infer_batch` 逐视频容错，结束时汇报失败数量与原因。
-- **特征缓存失效校验**：缓存附带帧签名（文件名+大小+mtime），人工清洗/重拆帧后自动重提取，避免用过期特征。
+# 3) 训练
+python train.py --data data/labels.json --cache-dir features_cache \
+    --output-dir checkpoints --epochs 100 --lr 1e-3 --seed 42
+
+# 4) Gradio
+python app.py
+```
+
+## 工程健壮性
+
+- **中文路径不崩溃**：ffmpeg 子进程统一 `utf-8 + errors="replace"` 解码，规避 Windows GBK `UnicodeDecodeError`；`res.stderr` 判空。
+- **坏视频不中断批次**：单视频失败 `[warn]` 跳过并继续，结束汇报失败数量与原因。
+- **特征缓存失效校验**：缓存带帧签名（文件名+大小+mtime），清洗/重拆帧后自动重提取。
 - **同名去重 + manifest**：见上文「同名视频自动去重」。
 - **Checkpoint 加载安全化**：`torch.load(..., weights_only=True)`。
-- **ffmpeg 版本兼容**：`-vsync`/`-fps_mode` 自动适配。
-- **最佳 Checkpoint**：按 `(val_auc, -val_loss)` 联合择优，auc 平局时选 loss 更低者。
+- **最佳 Checkpoint**：按 `(val_auc, -val_loss)` 联合择优。
 
 ## 变更记录
 
-- **v0.1 初版**：Spec v2.0 完整实现——DINOv3 骨干 + Masked Attention Pooling + MLP 头；拆帧（uniform/scene）/特征提取/训练/Gradio 双 Tab/Checkpoint 规范。
-- **抽帧优化**：时长自适应均匀抽样；`keyframe` 模式（只解 I 帧，快 ~10 倍）；输出分辨率上限 640；并行 `workers`；均匀封顶到 `max_frames`。
-- **规模扩展**：`infer_batch.py` 批量推理（一次加载骨干/模型、特征缓存、进度条、CSV 三列输出、坏视频容错、`--min/max-frames`）。
-- **健壮性**：GBK 解码修复、`res.stderr` 判空、torch `weights_only=True`、`--threads` CPU 限制、重拆帧清空旧帧、空目录防御。
-- **模块整理**：模型类收拢到 `model.py`；命名契约（`FramesNamer` + manifest）统一在 `paths.py`；常量去重；递归文件夹扫描。
-- **标注工作流**：标注 Tab 支持「一键拆帧并标注 / 标注 frames/ 全部已拆帧 / 续标」；导出绝对路径。
+- **v0.1 初版**：DINOv3 骨干 + Masked Attention Pooling + MLP 头；拆帧（uniform/scene）/特征提取/训练/Gradio/Checkpoint 规范。
+- **规模扩展**：批量推理（一次加载骨干/模型、特征缓存、进度条、CSV 三列、坏视频容错）。
+- **重构**：抽出 `Predictor` 公共层；`frames.py` 拆为 `ffmpeg.py`/`sampling.py`/编排；`paths.py` 拆出 `manifest.py`；`features.py` 抽 `pipeline.prefetch_map`；标注会话状态机下沉 `labeling.py`；清理死代码。
+- **GUI 化**：Gradio 扩展为六 Tab（拆帧/标注/推理/批量推理/工具/训练）；训练后台线程 + 实时曲线；标注预览高度/列数可调；工具 Tab 适配 `random_pick_videos` 与 `move_low_score_files`。
