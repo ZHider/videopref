@@ -1,14 +1,15 @@
-"""3.5 Gradio UI（三 Tab：拆帧 / 标注 / 推理）。
+"""3.5 Gradio UI（四 Tab：拆帧 / 标注 / 推理 / 批量推理）。
 
 - 🎬 拆帧：视频文件 / 文件夹 / **视频路径列表文本**（每行一个路径）
   -> 时长自适应均匀抽样 + 纯黑白过滤 -> 写入 frames/。
-- 🏷️ 标注：视频路径列表 -> 一键拆帧 -> 逐视频展示帧图，点「喜欢/不喜欢」
+- 🏷️ 标注：对 ``frames/`` 下已拆帧的视频逐一看图点「喜欢/不喜欢」
   完成分类；进度持久化到 ``data/label_progress.json``，可续标；导出 labels.json。
 - 🔍 推理：Dropdown 动态扫描 frames/ 子文件夹 + Checkpoint -> 输出
   like_probability + JSON。
+- ⚡ 批量推理：视频路径列表 + Checkpoint -> 批量抽帧/特征/预测 -> 结果表 + CSV。
 
-推理 Tab 不维护会话状态、不缓存特征、不存储中间结果；
-所有超参数从 Checkpoint 读取，禁止硬编码。
+拆帧与标注解耦：标注 Tab 不再负责拆帧，只标注已存在的帧目录。
+推理/批量推理 Tab 不维护会话状态；所有超参数从 Checkpoint 读取，禁止硬编码。
 标注 Tab 的队列/进度属于交互会话状态（gr.State + 磁盘持久化），
 这是标注流程的固有需求，与推理端无状态不冲突。
 """
@@ -21,13 +22,13 @@ from pathlib import Path
 import gradio as gr
 
 from . import config
+from .batch_infer import run_batch_inference, write_results
 from .frames import extract_from_input
 from .inference import infer_frames
 from .labeling import (
     advance,
     build_queue_from_frames,
     current_entry,
-    extract_and_build_queue,
     load_progress,
     new_state,
     parse_video_list,
@@ -75,45 +76,6 @@ def _file_value_to_path(v) -> Path | None:
 # ---------------------------------------------------------------------------
 # 标注：事件（会话状态机逻辑在 labeling.py，这里只做 UI 绑定与持久化）
 # ---------------------------------------------------------------------------
-def do_start_labeling(
-    video_list_text,
-    sampling,
-    fps_target,
-    min_frames,
-    max_frames,
-    scene_threshold,
-    black_thresh,
-    white_thresh,
-    state,
-    progress=gr.Progress(),
-):
-    """一键拆帧 + 开始标注。"""
-    paths = parse_video_list(video_list_text)
-    if not paths:
-        return "未找到有效视频路径（请每行一个，且文件存在）。", "", "", [], state
-    try:
-        queue = extract_and_build_queue(
-            paths,
-            Path(config.FRAMES_ROOT),
-            sampling=sampling,
-            scene_threshold=float(scene_threshold),
-            fps_target=float(fps_target),
-            min_frames=int(min_frames),
-            max_frames=int(max_frames),
-            black_threshold=int(black_thresh),
-            white_threshold=int(white_thresh),
-            progress=progress,
-        )
-    except Exception as e:
-        return f"拆帧失败：{e}", "", "", [], state
-
-    state = {"queue": queue, "idx": 0, "labels": {}, "skipped": []}
-    save_progress(state)
-    name, prog, imgs = render_state(state)
-    summary = f"拆帧完成：{len(queue)} 个视频，开始标注。进度已保存到 {config.DATA_DIR / 'label_progress.json'}"
-    return summary, name, prog, imgs, state
-
-
 def do_resume(state):
     saved = load_progress()
     if saved is None:
@@ -231,6 +193,71 @@ def do_infer(frames_folder, checkpoint_path, backbone_dir):
 
 
 # ---------------------------------------------------------------------------
+# 批量推理
+# ---------------------------------------------------------------------------
+def do_batch_infer(
+    video_list_text,
+    sampling,
+    fps_target,
+    min_frames,
+    max_frames,
+    scene_threshold,
+    black_thresh,
+    white_thresh,
+    checkpoint_path,
+    backbone_dir,
+    batch_size,
+    workers,
+    threads,
+    max_width,
+    export_csv,
+    progress=gr.Progress(),
+):
+    """批量推理：解析路径列表 -> run_batch_inference -> 结果表 + CSV。"""
+    paths = parse_video_list(video_list_text)
+    if not paths:
+        return [], "未找到有效视频路径（请每行一个视频文件或文件夹路径，且存在）。"
+    if not checkpoint_path:
+        return [], "请选择 Checkpoint。"
+
+    try:
+        results = run_batch_inference(
+            paths,
+            checkpoint_path,
+            sampling=sampling,
+            batch_size=int(batch_size),
+            workers=int(workers),
+            threads=int(threads),
+            max_width=int(max_width),
+            min_frames=int(min_frames),
+            max_frames=int(max_frames),
+            progress=progress,
+            show_progress=False,
+        )
+    except Exception as e:
+        return [], f"批量推理失败：{e}"
+
+    rows = [
+        [
+            Path(r["video_path"]).name,
+            "" if r["like_probability"] is None else f"{r['like_probability']:.6f}",
+            r["video_path"],
+        ]
+        for r in results
+    ]
+
+    ok = sum(1 for r in results if r.get("error") is None)
+    like = sum(1 for r in results if r.get("predicted_label") == 1)
+    fail = len(results) - ok
+
+    summary = f"完成 {ok}/{len(results)} 个，预测为喜欢 {like} 个，失败 {fail} 个。"
+    if export_csv:
+        out = write_results(results, config.DATA_DIR / "predictions.csv")
+        summary += f" 已导出 CSV -> {out}"
+    return rows, summary
+
+
+# ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
 def _sampling_accordion():
@@ -254,7 +281,7 @@ def build_ui():
         gr.Markdown(
             "# 🎬 个人视频喜好二分类器\n"
             "**冻结 DINOv3 骨干 + Masked Attention Pooling + 轻量 MLP 分类头**。\n"
-            "流程：粘贴视频路径列表 → 一键拆帧 → 逐视频看图点「喜欢/不喜欢」→ 训练 → 推理。"
+            "流程：拆帧 → 逐视频看图点「喜欢/不喜欢」→ 训练 → 推理。"
         )
 
         # ---------------- Tab 1: 拆帧 ----------------
@@ -285,16 +312,10 @@ def build_ui():
 
         # ---------------- Tab 2: 标注 ----------------
         with gr.Tab("🏷️ 标注"):
+            gr.Markdown("先到「🎬 拆帧」Tab 拆帧，再在这里对 `frames/` 下已拆帧的视频逐一看图标注。")
             state = gr.State(new_state())
-            video_list_text = gr.Textbox(
-                label="视频路径列表（每行一个视频文件路径）",
-                lines=12,
-                placeholder="D:/videos/a.mp4\nD:/videos/b.mp4\n...",
-            )
-            sampling_l, fps_l, min_l, max_l, scene_l, black_l, white_l = _sampling_accordion()
             with gr.Row():
-                btn_start = gr.Button("一键拆帧并开始标注", variant="primary")
-                btn_scan_all = gr.Button("标注 frames/ 全部已拆帧视频")
+                btn_scan_all = gr.Button("标注 frames/ 全部已拆帧视频", variant="primary")
                 btn_resume = gr.Button("继续上次标注")
             status_out = gr.Textbox(label="状态", lines=2, interactive=False)
             video_name = gr.Markdown("等待开始…")
@@ -311,11 +332,6 @@ def build_ui():
             label_inputs = [state]
             label_outputs = [video_name, progress_lbl, gallery, state]
 
-            btn_start.click(
-                do_start_labeling,
-                inputs=[video_list_text, sampling_l, fps_l, min_l, max_l, scene_l, black_l, white_l, state],
-                outputs=[status_out, video_name, progress_lbl, gallery, state],
-            )
             btn_scan_all.click(do_scan_all, inputs=label_inputs, outputs=[status_out, video_name, progress_lbl, gallery, state])
             btn_resume.click(do_resume, inputs=label_inputs, outputs=[status_out, video_name, progress_lbl, gallery, state])
             btn_like.click(do_like, inputs=label_inputs, outputs=label_outputs)
@@ -360,6 +376,46 @@ def build_ui():
                 do_infer,
                 inputs=[frames_dd, ckpt_dd, backbone_dir],
                 outputs=[like_prob, json_out],
+            )
+
+        # ---------------- Tab 4: 批量推理 ----------------
+        with gr.Tab("⚡ 批量推理"):
+            gr.Markdown(
+                "对成百上千个视频批量推理：缺帧视频自动拆帧（默认 `keyframe` 快速模式），"
+                "骨干与 Checkpoint 只加载一次，坏视频自动跳过。结果以表格展示并可导出 CSV。"
+            )
+            batch_list_text = gr.Textbox(
+                label="视频路径列表（每行一个视频文件或文件夹路径）",
+                lines=8,
+                placeholder="D:/videos/a.mp4\nF:/GV/b.mp4\nD:/some_folder\n...",
+            )
+            batch_sampling, batch_fps, batch_min, batch_max, batch_scene, batch_black, batch_white = _sampling_accordion()
+            with gr.Row():
+                batch_ckpt = gr.Dropdown(label="Checkpoint", choices=_list_checkpoints(), interactive=True)
+                batch_backbone = gr.Textbox(label="骨干权重目录（可选）", value=str(config.DEFAULT_BACKBONE_DIR))
+            with gr.Row():
+                batch_batchsize = gr.Slider(1, 64, value=16, step=1, label="特征提取 batch（调大提升 GPU 利用率）")
+                batch_workers = gr.Slider(1, 16, value=float(config.EXTRACT_WORKERS), step=1, label="并行拆帧视频数")
+                batch_threads = gr.Slider(1, 16, value=8, step=1, label="torch CPU 线程数上限")
+                batch_maxwidth = gr.Slider(0, 1280, value=float(config.EXTRACT_MAX_WIDTH), step=16, label="拆帧宽度上限（0=不缩放）")
+            batch_export = gr.Checkbox(value=True, label="同时导出 CSV 到 data/predictions.csv")
+            btn_batch = gr.Button("开始批量推理", variant="primary")
+            batch_summary = gr.Textbox(label="汇总", lines=2, interactive=False)
+            batch_table = gr.Dataframe(
+                headers=["文件名", "喜好概率", "文件全路径"],
+                datatype=["str", "str", "str"],
+                interactive=False,
+                wrap=True,
+            )
+
+            btn_batch.click(
+                do_batch_infer,
+                inputs=[
+                    batch_list_text, batch_sampling, batch_fps, batch_min, batch_max,
+                    batch_scene, batch_black, batch_white, batch_ckpt, batch_backbone,
+                    batch_batchsize, batch_workers, batch_threads, batch_maxwidth, batch_export,
+                ],
+                outputs=[batch_table, batch_summary],
             )
 
     return demo

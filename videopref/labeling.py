@@ -1,12 +1,12 @@
-"""标注工作流：视频路径列表 -> 一键拆帧 -> UI 逐视频标注 -> labels.json。
+"""标注工作流：扫描 ``frames/`` 下已拆帧目录 -> UI 逐视频标注 -> labels.json。
 
 设计：
-- 输入为文本（每行一个视频路径）。
-- 拆帧采用时长自适应均匀抽样（见 ``frames.extract_frames``）。
 - 队列条目: ``{"video_path", "key", "frames", "n_frames"}``，``key`` 即
   ``frames/`` 下的目录名（同名视频会带 hash 后缀），作为 labels 的唯一键。
 - 标注结果: ``{key: 0/1}``。
 - 进度持久化到 ``data/label_progress.json``，支持中断续标。
+- 拆帧由独立的「拆帧」入口（``frames.extract_frames``/``extract_from_input``）
+  完成，本模块只负责从已有帧目录构建队列，不再拆帧。
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ import json
 from pathlib import Path
 
 from . import config
-from .frames import extract_from_input
 from .manifest import load_manifest
 from .paths import iter_video_files, list_frame_files
 
@@ -50,53 +49,8 @@ def parse_video_list(text: str) -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
-# 拆帧 + 队列构建
+# 队列构建（从已拆帧目录，不重新拆帧）
 # ---------------------------------------------------------------------------
-def extract_and_build_queue(
-    video_paths: list[Path],
-    frames_root: Path,
-    sampling: str = config.DEFAULT_SAMPLING,
-    scene_threshold: float = config.DEFAULT_SCENE_THRESHOLD,
-    fps_target: float = config.FPS_TARGET,
-    min_frames: int = config.MIN_FRAMES,
-    max_frames: int = config.DEFAULT_MAX_FRAMES,
-    black_threshold: int = config.BLACK_FRAME_MEAN,
-    white_threshold: int = config.WHITE_FRAME_MEAN,
-    progress=None,
-) -> list[dict]:
-    """逐个视频拆帧并构建标注队列。
-
-    ``progress`` 可选回调 ``progress((i, total), desc=...)``。
-    """
-    frames_root = Path(frames_root)
-    frames_root.mkdir(parents=True, exist_ok=True)
-    # 复用 extract_from_input：统一走同名去重 + manifest，队列 key 与训练解析一致
-    out_dirs = extract_from_input(
-        video_paths,
-        frames_root,
-        sampling=sampling,
-        scene_threshold=scene_threshold,
-        fps_target=fps_target,
-        min_frames=min_frames,
-        max_frames=max_frames,
-        black_threshold=black_threshold,
-        white_threshold=white_threshold,
-        progress=progress,
-    )
-    queue: list[dict] = []
-    for v, out_dir in zip(video_paths, out_dirs):
-        frames = [str(p) for p in list_frame_files(out_dir)]
-        queue.append(
-            {
-                "video_path": str(v),
-                "key": out_dir.name,
-                "frames": frames,
-                "n_frames": len(frames),
-            }
-        )
-    return queue
-
-
 def build_queue_from_frames(frames_root: Path) -> list[dict]:
     """扫描 ``frames/`` 下所有含帧的子目录，直接构建标注队列（不重新拆帧）。
 
