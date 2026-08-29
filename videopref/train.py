@@ -9,12 +9,14 @@
 - 训练期可选数据增强（随机水平翻转、颜色抖动、轻微旋转）；不影响缓存特征。
 - tqdm 进度条 + tensorboard/wandb 日志。
 - 仅训练 Attention Pooling 与 MLP 分类头，DINOv3 骨干全程冻结。
+
+``run_training`` 同时供 CLI 与 Gradio 复用：CLI 传 ``log=print, use_tqdm=True``，
+Gradio 传逐 epoch 的 ``progress``/``log`` 回调与 ``use_tqdm=False``。
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import random
 import sys
 from pathlib import Path
@@ -99,9 +101,30 @@ def evaluate(model, loader, device) -> tuple[float, float]:
 # ---------------------------------------------------------------------------
 # 训练
 # ---------------------------------------------------------------------------
-def run_training(args) -> Path:
+def run_training(args, progress=None, log=None, use_tqdm: bool = True) -> dict:
+    """训练模型并返回结果。
+
+    Parameters
+    ----------
+    args : 训练参数（argparse Namespace 或等价对象）。必需字段：
+        data / cache_dir / output_dir / epochs / lr / seed / batch_size /
+        threads / val_fraction / augment / backbone_dir / backbone_id；
+        可选：device / log_dir / wandb。
+    progress : 可选 ``progress(epoch, total_epochs, metrics)`` 逐 epoch 回调。
+    log : 可选 ``log(msg)`` 日志回调；None 则静默。
+    use_tqdm : train loop 是否用 tqdm（CLI 用 True，Gradio 传 False）。
+
+    Returns
+    -------
+    dict: ``{"best_path", "final_path", "history", "train_loss", "val_auc"}``
+    """
+
+    def _emit(msg: str) -> None:
+        if log is not None:
+            log(msg)
+
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
-    print(f"[info] device = {device}")
+    _emit(f"[info] device = {device}")
 
     # 控制 CPU 线程数：训练主要在 GPU 上进行，torch 默认用满所有核会对极小算子
     # 做线程调度/自旋，导致 CPU 打满而 GPU 空转。限制线程数可显著降低 CPU 占用。
@@ -111,7 +134,7 @@ def run_training(args) -> Path:
             torch.set_num_interop_threads(args.threads)
         except RuntimeError:
             pass  # interop 线程只能在并行工作开始前设置
-        print(f"[info] torch threads = {torch.get_num_threads()} (CPU cap)")
+        _emit(f"[info] torch threads = {torch.get_num_threads()} (CPU cap)")
 
     # 种子
     random.seed(args.seed)
@@ -123,7 +146,7 @@ def run_training(args) -> Path:
     # 骨干（冻结）
     backbone, processor, feature_dim = load_backbone(args.backbone_dir, device=device)
     image_size = processor_image_size(processor)
-    print(f"[info] backbone feature_dim = {feature_dim}, image_size = {image_size}")
+    _emit(f"[info] backbone feature_dim = {feature_dim}, image_size = {image_size}")
 
     # 数据
     labels = load_labels(args.data)
@@ -131,7 +154,6 @@ def run_training(args) -> Path:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    train_loader = val_loader = None
     if args.augment:
         train_ds, val_ds = build_augmented_train(
             labels,
@@ -144,12 +166,6 @@ def run_training(args) -> Path:
             image_size=image_size,
             batch_size=args.batch_size,
         )
-        train_loader = torch.utils.data.DataLoader(
-            train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_videos, num_workers=0
-        )
-        val_loader = torch.utils.data.DataLoader(
-            val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_videos, num_workers=0
-        )
     else:
         train_ds, val_ds = build_train_val(
             labels,
@@ -161,26 +177,26 @@ def run_training(args) -> Path:
             batch_size=args.batch_size,
             seed=args.seed,
         )
-        train_loader = torch.utils.data.DataLoader(
-            train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_videos, num_workers=0
-        )
-        val_loader = torch.utils.data.DataLoader(
-            val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_videos, num_workers=0
-        )
+    train_loader = torch.utils.data.DataLoader(
+        train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_videos, num_workers=0
+    )
+    val_loader = torch.utils.data.DataLoader(
+        val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_videos, num_workers=0
+    )
 
-    print(f"[info] train samples = {len(train_ds)}, val samples = {len(val_ds)}")
+    _emit(f"[info] train samples = {len(train_ds)}, val samples = {len(val_ds)}")
     if len(train_ds) == 0:
-        raise SystemExit("训练集为空：请检查 frames/ 下是否有清洗后的帧，以及 labels.json 路径是否匹配。")
+        raise RuntimeError("训练集为空：请检查 frames/ 下是否有清洗后的帧，以及 labels.json 路径是否匹配。")
 
     # 模型 + 优化器（仅可训练参数）
     model = VideoPreferenceModel(feature_dim=feature_dim).to(device)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    print(f"[info] trainable params = {sum(p.numel() for p in trainable_params):,}")
+    _emit(f"[info] trainable params = {sum(p.numel() for p in trainable_params):,}")
     optimizer = torch.optim.Adam(trainable_params, lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     criterion = torch.nn.BCEWithLogitsLoss()
 
-    logger = Logger(log_dir=args.log_dir, use_wandb=args.wandb)
+    logger = Logger(log_dir=getattr(args, "log_dir", None), use_wandb=getattr(args, "wandb", False))
     best_key = (float("-inf"), float("-inf"))
     best_path: Path | None = None
     label_mapping = config.LABEL_MAPPING
@@ -190,9 +206,14 @@ def run_training(args) -> Path:
         max_frames=config.DEFAULT_MAX_FRAMES,
     )
 
+    history: list[dict] = []
     for epoch in range(1, args.epochs + 1):
         model.train()
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", leave=False)
+        pbar = (
+            tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", leave=False)
+            if use_tqdm
+            else train_loader
+        )
         running_loss, count = 0.0, 0
         for feats, mask, labels in pbar:
             feats = feats.to(device)
@@ -205,19 +226,21 @@ def run_training(args) -> Path:
             optimizer.step()
             running_loss += loss.item() * feats.shape[0]
             count += feats.shape[0]
-            pbar.set_postfix(loss=f"{running_loss / max(count, 1):.4f}")
+            if use_tqdm:
+                pbar.set_postfix(loss=f"{running_loss / max(count, 1):.4f}")
         train_loss = running_loss / max(count, 1)
         scheduler.step()
 
         val_loss, val_auc = evaluate(model, val_loader, device)
-        metrics = {"train_loss": train_loss, "val_loss": val_loss}
+        metrics = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss}
         if val_auc is not None:
             metrics["val_auc"] = val_auc
         logger.log(metrics, epoch)
         msg = f"[Epoch {epoch}/{args.epochs}] train_loss={train_loss:.4f} val_loss={val_loss:.4f}"
         if val_auc is not None:
             msg += f" val_auc={val_auc:.4f}"
-        print(msg)
+        _emit(msg)
+        history.append(dict(metrics))
 
         # 按 (val_auc, -val_loss) 联合择优保存最佳；auc 平局时选择 loss 更低者
         cur_key = (val_auc, -val_loss) if val_auc is not None else (float("-inf"), -val_loss)
@@ -229,6 +252,9 @@ def run_training(args) -> Path:
             best_path = output_dir / config.CHECKPOINT_FILENAME
             save_checkpoint(best_path, model, ckpt_config, label_mapping, stats)
 
+        if progress is not None:
+            progress(epoch, args.epochs, dict(metrics))
+
     logger.close()
 
     # 始终再存一个最终版
@@ -238,9 +264,15 @@ def run_training(args) -> Path:
         stats["val_auc"] = val_auc
     save_checkpoint(final_path, model, ckpt_config, label_mapping, stats)
 
-    print(f"\n[done] best checkpoint -> {best_path}")
-    print(f"[done] final checkpoint -> {final_path}")
-    return best_path
+    _emit(f"\n[done] best checkpoint -> {best_path}")
+    _emit(f"[done] final checkpoint -> {final_path}")
+    return {
+        "best_path": best_path,
+        "final_path": final_path,
+        "history": history,
+        "train_loss": train_loss,
+        "val_auc": val_auc,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -265,7 +297,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    run_training(args)
+    try:
+        run_training(args, log=print, use_tqdm=True)
+    except RuntimeError as e:
+        print(f"错误: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
