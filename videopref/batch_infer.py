@@ -194,7 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cache-dir", default=str(config.FEATURES_CACHE_DIR), help="特征缓存目录")
     p.add_argument("--backbone-dir", default=str(config.DEFAULT_BACKBONE_DIR), help="骨干权重目录")
     p.add_argument("--sampling", default="keyframe", choices=["uniform", "keyframe", "scene"], help="抽帧方式")
-    p.add_argument("--batch-size", type=int, default=64, help="特征提取 batch（调大可提升 GPU 利用率、减少 CPU 开销）")
+    p.add_argument("--batch-size", type=int, default=16, help="特征提取 batch（配合流水线预取：batch 略小于单视频帧数时，CPU 预处理与 GPU 前向重叠最充分）")
     p.add_argument("--workers", type=int, default=config.EXTRACT_WORKERS, help="并行抽帧视频数")
     p.add_argument("--threads", type=int, default=8, help="torch CPU 线程数上限（降低 CPU 占用；0=不限制）")
     p.add_argument("--max-width", type=int, default=config.EXTRACT_MAX_WIDTH, help="抽帧宽度上限")

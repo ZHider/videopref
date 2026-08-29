@@ -16,14 +16,19 @@ from pathlib import Path
 
 from . import config
 from .frames import extract_from_input
-from .paths import frames_dir_for_video, list_frame_files
+from .paths import frames_dir_for_video, iter_video_files, list_frame_files
 
 
 # ---------------------------------------------------------------------------
 # 输入解析
 # ---------------------------------------------------------------------------
 def parse_video_list(text: str) -> list[Path]:
-    """解析每行一个视频路径的文本；去重、过滤不存在的文件。"""
+    """解析每行一个视频路径的文本；去重、过滤不存在的文件。
+
+    支持每行一个**文件**或一个**文件夹**：
+    - 文件：直接收录（若存在）。
+    - 文件夹：递归扫描其下所有视频文件。
+    """
     paths: list[Path] = []
     seen: set[str] = set()
     for line in text.splitlines():
@@ -31,7 +36,13 @@ def parse_video_list(text: str) -> list[Path]:
         if not line:
             continue
         p = Path(line)
-        if p.is_file() and str(p) not in seen:
+        if p.is_dir():
+            # 文件夹：递归展开为视频文件
+            for vp in iter_video_files(p, recursive=True):
+                if str(vp) not in seen:
+                    seen.add(str(vp))
+                    paths.append(vp)
+        elif p.is_file() and str(p) not in seen:
             seen.add(str(p))
             paths.append(p)
     return paths

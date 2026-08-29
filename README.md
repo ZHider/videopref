@@ -121,6 +121,7 @@ python -c "from pathlib import Path; from videopref.frames import extract_from_i
 - 关键帧密度由视频编码器的 GOP 决定：典型 H.264/H.265 视频关键帧较密 → 很快；极稀疏关键帧的视频会触发回退（变慢，属保质量的兜底）。
 
 **其它性能/一致性优化**：
+- **流水线预取（prefetch）**：特征提取时，CPU 预处理（解码/缩放/归一化）在后台线程进行，与 GPU 前向重叠（有界队列背压），避免 GPU 空等 CPU。实测约 **2x 提速**。单视频帧数 > batch_size 时效果最明显，故批量推理默认 `--batch-size 16`。
 - **输出分辨率上限** `EXTRACT_MAX_WIDTH=640`（DINOv3 只需 224，对分类无损，显著降低 JPEG 编码 CPU 与磁盘）。
 - **并行抽帧** `--workers`（默认 4，ffmpeg 子进程并行）。
 - **均匀封顶**：超过 `max_frames` 时按序号均匀抽取（`_uniform_sample_list`），避免只取视频开头。
@@ -177,7 +178,7 @@ python infer_batch.py --videos data/video_list.txt --checkpoint checkpoints/mode
 - **进度条**：加载骨干 / 抽帧 / 推理三个阶段均有 tqdm 进度。
 - **容错**：单个视频损坏/失败只跳过并记录（`[warn] 拆帧失败`），不中断整批；结束打印失败数量与前 10 个原因。
 - 特征缓存在 `features_cache/`（带帧签名校验），重复运行不重复提取。
-- 其他参数：`--min-frames`（默认 4）、`--max-frames`（默认 32）、`--workers`、`--max-width`、`--batch-size`（默认 64）、`--threads`（torch CPU 线程上限，默认 8，降低 CPU 占用）、`--limit`（只测前 N 个）。
+- 其他参数：`--min-frames`（默认 4）、`--max-frames`（默认 32）、`--workers`、`--max-width`、`--batch-size`（默认 16，配合预取）、`--threads`（torch CPU 线程上限，默认 8，降低 CPU 占用）、`--limit`（只测前 N 个）。
 
 ---
 
