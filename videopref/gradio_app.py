@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -180,6 +181,27 @@ def do_extract(video_file, folder_path, video_list_text, sampling, fps_target, m
 
 
 # ---------------------------------------------------------------------------
+# 拆帧：清空全部记录
+# ---------------------------------------------------------------------------
+def do_clear_frames(confirmed: bool) -> str:
+    """清空 frames/ 下的全部拆帧文件夹与 _manifest.json。"""
+    if not confirmed:
+        return "未勾选确认，已取消清空。"
+    root = Path(config.FRAMES_ROOT)
+    if not root.is_dir():
+        return "frames/ 目录不存在，无需清空。"
+    dirs = removed = 0
+    for p in root.iterdir():
+        if p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)
+            dirs += 1
+        elif p.is_file() and p.name == "_manifest.json":
+            p.unlink(missing_ok=True)
+            removed += 1
+    return f"已清空 {dirs} 个拆帧文件夹、{removed} 个 manifest 文件。"
+
+
+# ---------------------------------------------------------------------------
 # 推理
 # ---------------------------------------------------------------------------
 def do_infer(frames_folder, checkpoint_path, backbone_dir):
@@ -199,33 +221,40 @@ def do_infer(frames_folder, checkpoint_path, backbone_dir):
 
 
 # ---------------------------------------------------------------------------
-# 批量推理
+# 批量推理：后台线程 + 全局状态 + Timer 轮询（进度收敛到「汇总」一框，避免 gr.Progress 重复）
 # ---------------------------------------------------------------------------
-def do_batch_infer(
-    video_list_text,
-    sampling,
-    fps_target,
-    min_frames,
-    max_frames,
-    scene_threshold,
-    black_thresh,
-    white_thresh,
-    checkpoint_path,
-    backbone_dir,
-    batch_size,
-    workers,
-    threads,
-    max_width,
-    export_csv,
-    progress=gr.Progress(),
-):
-    """批量推理：解析路径列表 -> run_batch_inference -> 结果表 + CSV。"""
-    paths = parse_video_list(video_list_text)
-    if not paths:
-        return [], "未找到有效视频路径（请每行一个视频文件或文件夹路径，且存在）。"
-    if not checkpoint_path:
-        return [], "请选择 Checkpoint。"
+_batch_lock = threading.Lock()
+_batch = {
+    "running": False,
+    "progress": "",
+    "rows": [],
+    "summary": "",
+    "done": False,
+    "error": None,
+}
 
+
+def _build_batch_rows(results: list[dict]) -> list[list]:
+    return [
+        [
+            Path(r["video_path"]).name,
+            "" if r["like_probability"] is None else f"{r['like_probability']:.6f}",
+            r["video_path"],
+        ]
+        for r in results
+    ]
+
+
+def _on_batch_prog(pair, desc=None, **kwargs) -> None:
+    """run_batch_inference 的进度回调：写入全局状态（供 Timer 轮询）。"""
+    i, total = pair
+    with _batch_lock:
+        _batch["progress"] = f"{desc or '处理中'} {i}/{total}"
+
+
+def _batch_worker(paths, checkpoint_path, sampling, batch_size, workers, threads,
+                  max_width, min_frames, max_frames, export_csv) -> None:
+    """后台线程执行批量推理，把进度/结果写入全局 _batch。"""
     try:
         results = run_batch_inference(
             paths,
@@ -237,30 +266,59 @@ def do_batch_infer(
             max_width=int(max_width),
             min_frames=int(min_frames),
             max_frames=int(max_frames),
-            progress=progress,
+            progress=_on_batch_prog,
             show_progress=False,
         )
-    except Exception as e:
-        return [], f"批量推理失败：{e}"
+        ok = sum(1 for r in results if r.get("error") is None)
+        like = sum(1 for r in results if r.get("predicted_label") == 1)
+        fail = len(results) - ok
+        summary = f"完成 {ok}/{len(results)} 个，预测为喜欢 {like} 个，失败 {fail} 个。"
+        if export_csv:
+            out = write_results(results, config.DATA_DIR / "predictions.csv")
+            summary += f" 已导出 CSV -> {out}"
+        with _batch_lock:
+            _batch.update(rows=_build_batch_rows(results), summary=summary, done=True)
+    except Exception as e:  # noqa: BLE001 - 反馈到 UI
+        with _batch_lock:
+            _batch.update(done=True, error=f"{e}")
+    finally:
+        with _batch_lock:
+            _batch["running"] = False
 
-    rows = [
-        [
-            Path(r["video_path"]).name,
-            "" if r["like_probability"] is None else f"{r['like_probability']:.6f}",
-            r["video_path"],
-        ]
-        for r in results
-    ]
 
-    ok = sum(1 for r in results if r.get("error") is None)
-    like = sum(1 for r in results if r.get("predicted_label") == 1)
-    fail = len(results) - ok
+def do_batch_infer_start(video_list_text, sampling, fps_target, min_frames, max_frames,
+                         scene_threshold, black_thresh, white_thresh, checkpoint_path,
+                         backbone_dir, batch_size, workers, threads, max_width, export_csv):
+    """启动后台批量推理（不阻塞 UI，进度经 Timer 轮询更新）。"""
+    paths = parse_video_list(video_list_text)
+    if not paths:
+        return "未找到有效视频路径（请每行一个视频文件或文件夹路径，且存在）。"
+    if not checkpoint_path:
+        return "请选择 Checkpoint。"
+    with _batch_lock:
+        if _batch["running"]:
+            return "已有批量推理在进行中，请等待完成。"
+        _batch.update(running=True, progress="", rows=[], summary="", done=False, error=None)
+    threading.Thread(
+        target=_batch_worker,
+        args=(paths, checkpoint_path, sampling, batch_size, workers, threads,
+              max_width, min_frames, max_frames, export_csv),
+        daemon=True,
+    ).start()
+    return f"已启动批量推理：{len(paths)} 个视频。请稍候…"
 
-    summary = f"完成 {ok}/{len(results)} 个，预测为喜欢 {like} 个，失败 {fail} 个。"
-    if export_csv:
-        out = write_results(results, config.DATA_DIR / "predictions.csv")
-        summary += f" 已导出 CSV -> {out}"
-    return rows, summary
+
+def batch_tick():
+    """被 gr.Timer 轮询，返回 (进度/汇总文本, 结果表)。"""
+    with _batch_lock:
+        st = dict(_batch)
+    if st["running"]:
+        return st["progress"] or "处理中…", []
+    if st["done"]:
+        if st["error"]:
+            return f"❌ 批量推理出错：{st['error']}", []
+        return st["summary"], st["rows"]
+    return "", []
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +569,12 @@ def build_ui():
                 outputs=[out_msg, out_paths],
             )
 
+            with gr.Row():
+                clear_confirm = gr.Checkbox(value=False, label="我确认要清空 frames/ 下的全部拆帧记录（含 manifest）")
+                btn_clear = gr.Button("清空全部记录", variant="stop")
+            clear_out = gr.Textbox(label="清空结果", lines=2, interactive=False)
+            btn_clear.click(do_clear_frames, inputs=[clear_confirm], outputs=[clear_out])
+
         # ---------------- Tab 2: 标注 ----------------
         with gr.Tab("🏷️ 标注"):
             gr.Markdown("先到「🎬 拆帧」Tab 拆帧，再在这里对 `frames/` 下已拆帧的视频逐一看图标注。")
@@ -624,14 +688,16 @@ def build_ui():
             )
 
             btn_batch.click(
-                do_batch_infer,
+                do_batch_infer_start,
                 inputs=[
                     batch_list_text, batch_sampling, batch_fps, batch_min, batch_max,
                     batch_scene, batch_black, batch_white, batch_ckpt, batch_backbone,
                     batch_batchsize, batch_workers, batch_threads, batch_maxwidth, batch_export,
                 ],
-                outputs=[batch_table, batch_summary],
+                outputs=[batch_summary],
             )
+            batch_timer = gr.Timer(1.0)
+            batch_timer.tick(batch_tick, outputs=[batch_summary, batch_table])
 
         # ---------------- Tab 5: 工具 ----------------
         with gr.Tab("🧰 工具"):

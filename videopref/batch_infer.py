@@ -24,9 +24,24 @@ from . import config
 from .dataset import ensure_video_features
 from .frames import extract_from_input
 from .labeling import parse_video_list
-from .manifest import frames_dir_for_video
-from .paths import iter_video_files, list_frame_files
+from .manifest import frames_dir_for_video, load_manifest
+from .paths import iter_video_files
 from .predictor import Predictor
+
+
+def _frame_dirs_with_frames(frames_root: Path) -> set[str]:
+    """一次扫描 frames_root，返回所有含帧(.jpg)的子目录名集合。
+
+    供缺帧判定查表使用：把"每个视频扫一次目录"降为"一次全量扫描 + 集合查表"。
+    """
+    root = Path(frames_root)
+    if not root.is_dir():
+        return set()
+    return {
+        p.name
+        for p in root.iterdir()
+        if p.is_dir() and any(f.suffix.lower() == config.FRAME_EXT for f in p.iterdir())
+    }
 
 
 def resolve_videos(input_path: Path | str, recursive: bool = True) -> list[Path]:
@@ -85,7 +100,16 @@ def run_batch_inference(
     predictor = Predictor(checkpoint_path, backbone_dir=backbone_dir, device=device)
 
     # 3) 缺帧视频自动补抽（keyframe 快速模式）
-    missing = [v for v in videos if not list_frame_files(frames_dir_for_video(v, frames_root))]
+    # 预加载一次 manifest 并复用于每个视频的帧目录解析，避免逐视频重复读磁盘；
+    # 缺帧判定改为一次全量扫描 frames_root + 集合查表，避免每个视频都扫目录。
+    if progress is not None:
+        progress((0, 1), desc="检查已有帧目录…")
+    manifest = load_manifest(frames_root)
+    has_frames = _frame_dirs_with_frames(frames_root)
+    missing = [
+        v for v in videos
+        if frames_dir_for_video(v, frames_root, manifest=manifest).name not in has_frames
+    ]
     if missing:
         if progress is not None:
             extract_from_input(

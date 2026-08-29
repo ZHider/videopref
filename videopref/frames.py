@@ -25,6 +25,7 @@ from __future__ import annotations
 import shutil
 import sys
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -162,6 +163,7 @@ def extract_from_input(
     jobs = [(v, namer.assign(v)) for v in sources]
     total = len(jobs)
     done = [0]
+    done_lock = threading.Lock()  # 串行化进度上报，避免并发调用 gr.Progress 产生多个进度条
 
     def _one(job):
         v, out_dir = job
@@ -184,9 +186,10 @@ def extract_from_input(
             # 单个坏文件不应中断整批：记录并跳过
             print(f"[warn] 拆帧失败，跳过 {v.name}: {e}", file=sys.stderr)
             result = None
-        done[0] += 1
-        if progress is not None:
-            progress((done[0], total), desc=f"拆帧 {v.name}")
+        with done_lock:
+            done[0] += 1
+            if progress is not None:
+                progress((done[0], total), desc=f"拆帧 {v.name}")
         return result
 
     if workers and workers > 1:
