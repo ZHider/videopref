@@ -221,12 +221,14 @@ def do_infer(frames_folder, checkpoint_path, backbone_dir):
 
 
 # ---------------------------------------------------------------------------
-# 批量推理：后台线程 + 全局状态 + Timer 轮询（进度收敛到「汇总」一框，避免 gr.Progress 重复）
+# 批量推理：后台线程 + 全局状态 + Timer 轮询（进度条经 gr.Timer 串行更新，不重复）
 # ---------------------------------------------------------------------------
 _batch_lock = threading.Lock()
 _batch = {
     "running": False,
-    "progress": "",
+    "cur": 0,
+    "total": 0,
+    "desc": "",
     "rows": [],
     "summary": "",
     "done": False,
@@ -246,10 +248,11 @@ def _build_batch_rows(results: list[dict]) -> list[list]:
 
 
 def _on_batch_prog(pair, desc=None, **kwargs) -> None:
-    """run_batch_inference 的进度回调：写入全局状态（供 Timer 轮询）。"""
+    """run_batch_inference 的进度回调：写入全局状态（供 Timer 轮询显示）。"""
     i, total = pair
     with _batch_lock:
-        _batch["progress"] = f"{desc or '处理中'} {i}/{total}"
+        _batch["cur"], _batch["total"] = int(i), int(total)
+        _batch["desc"] = desc or ""
 
 
 def _batch_worker(paths, checkpoint_path, sampling, batch_size, workers, threads,
@@ -298,7 +301,7 @@ def do_batch_infer_start(video_list_text, sampling, fps_target, min_frames, max_
     with _batch_lock:
         if _batch["running"]:
             return "已有批量推理在进行中，请等待完成。"
-        _batch.update(running=True, progress="", rows=[], summary="", done=False, error=None)
+        _batch.update(running=True, cur=0, total=0, desc="", rows=[], summary="", done=False, error=None)
     threading.Thread(
         target=_batch_worker,
         args=(paths, checkpoint_path, sampling, batch_size, workers, threads,
@@ -308,17 +311,32 @@ def do_batch_infer_start(video_list_text, sampling, fps_target, min_frames, max_
     return f"已启动批量推理：{len(paths)} 个视频。请稍候…"
 
 
+def _progress_html(cur: int, total: int, desc: str = "") -> str:
+    """生成一个 HTML 进度条（Tab 内可见，由 Timer 轮询更新）。"""
+    pct = int(cur / total * 100) if total else 0
+    return (
+        '<div style="width:100%;background:#e5e7eb;border-radius:6px;height:18px;overflow:hidden">'
+        f'<div style="width:{pct}%;background:#22c55e;height:18px;border-radius:6px"></div></div>'
+        f'<div style="margin-top:4px;font-size:13px;color:#374151">{desc or "处理中"} {cur}/{total} ({pct}%)</div>'
+    )
+
+
 def batch_tick():
-    """被 gr.Timer 轮询，返回 (进度/汇总文本, 结果表)。"""
+    """被 gr.Timer 轮询：返回 (进度/汇总文本, 结果表, 进度条 HTML)。
+
+    gr.Timer 串行触发，进度条由本函数每次重绘为 Tab 内 HTML 组件，
+    稳定可见且不会像 gr.Progress 事件进度条那样重复或缺失。
+    """
     with _batch_lock:
         st = dict(_batch)
     if st["running"]:
-        return st["progress"] or "处理中…", []
+        html = _progress_html(st["cur"], st["total"], st["desc"]) if st["total"] else _progress_html(0, 1, "准备中")
+        return "处理中…", [], html  # 实时进度由进度条显示，汇总框保持简短
     if st["done"]:
         if st["error"]:
-            return f"❌ 批量推理出错：{st['error']}", []
-        return st["summary"], st["rows"]
-    return "", []
+            return f"❌ 批量推理出错：{st['error']}", [], ""
+        return st["summary"], st["rows"], ""
+    return "", [], ""
 
 
 # ---------------------------------------------------------------------------
@@ -679,6 +697,7 @@ def build_ui():
                 batch_maxwidth = gr.Slider(0, 1280, value=float(config.EXTRACT_MAX_WIDTH), step=16, label="拆帧宽度上限（0=不缩放）")
             batch_export = gr.Checkbox(value=True, label="同时导出 CSV 到 data/predictions.csv")
             btn_batch = gr.Button("开始批量推理", variant="primary")
+            batch_progress = gr.HTML()  # Tab 内可见的进度条（Timer 轮询更新）
             batch_summary = gr.Textbox(label="汇总", lines=2, interactive=False)
             batch_table = gr.Dataframe(
                 headers=["文件名", "喜好概率", "文件全路径"],
@@ -697,7 +716,7 @@ def build_ui():
                 outputs=[batch_summary],
             )
             batch_timer = gr.Timer(1.0)
-            batch_timer.tick(batch_tick, outputs=[batch_summary, batch_table])
+            batch_timer.tick(batch_tick, outputs=[batch_summary, batch_table, batch_progress])
 
         # ---------------- Tab 5: 工具 ----------------
         with gr.Tab("🧰 工具"):

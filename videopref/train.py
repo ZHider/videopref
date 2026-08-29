@@ -27,7 +27,7 @@ from tqdm import tqdm
 
 from . import config
 from .augment import processor_image_size
-from .backbone import load_backbone, trainable_parameter_count
+from .backbone import load_backbone
 from .dataset import build_augmented_train, build_train_val, collate_videos, load_labels
 from .model import VideoPreferenceModel, default_config, save_checkpoint
 

@@ -31,3 +31,8 @@ torchaudio = [
 name = "pytorch"
 url = "https://mirrors.nju.edu.cn/pytorch/whl/cu128/"
 explicit = true
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.5",
+]
