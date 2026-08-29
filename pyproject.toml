@@ -1,0 +1,27 @@
+[project]
+name = "pyai"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "gradio",
+    "numpy",
+    "scikit-learn",
+    "torch",
+    "torchvision",
+    "transformers",
+]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch"},
+]
+torchaudio = [
+  { index = "pytorch"},
+]
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://mirrors.nju.edu.cn/pytorch/whl/cu128/"
+explicit = true

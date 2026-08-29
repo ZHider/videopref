@@ -1,0 +1,36 @@
+# ---------- Python ----------
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------- 虚拟环境 ----------
+.venv/
+
+# ---------- 数据契约目录（运行时生成，体积大） ----------
+# 拆帧输出 + 人工清洗工作区
+frames/
+# 下载的 DINOv3 骨干权重
+models/
+# 训练产出 Checkpoint
+checkpoints/
+# 训练/推理特征缓存
+features_cache/
+
+# ---------- 数据与产物 ----------
+# 标注、测试视频、推理结果等（含个人数据，不入库）
+data/
+predictions.csv
+predictions.json
+data/label_progress.json
+*.ckpt
+
+# ---------- 日志 / 临时 ----------
+*.log
+.tmp/
+_*/
