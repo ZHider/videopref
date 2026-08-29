@@ -682,6 +682,7 @@ dependencies = [
     { name = "scikit-learn" },
     { name = "torch" },
     { name = "torchvision" },
+    { name = "tqdm" },
     { name = "transformers" },
 ]
 
@@ -692,6 +693,7 @@ requires-dist = [
     { name = "scikit-learn" },
     { name = "torch", index = "https://mirrors.nju.edu.cn/pytorch/whl/cu128/" },
     { name = "torchvision" },
+    { name = "tqdm", specifier = ">=4.70.0" },
     { name = "transformers" },
 ]
 

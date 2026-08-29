@@ -10,6 +10,7 @@ dependencies = [
     "scikit-learn",
     "torch",
     "torchvision",
+    "tqdm>=4.70.0",
     "transformers",
 ]
 
