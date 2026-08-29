@@ -476,6 +476,7 @@ def _sampling_accordion():
     return sampling, fps_target, min_frames, max_frames, scene_threshold, black_thresh, white_thresh
 
 
+
 def build_ui():
     with gr.Blocks(title="个人视频喜好二分类器") as demo:
         gr.Markdown(
@@ -520,7 +521,12 @@ def build_ui():
             status_out = gr.Textbox(label="状态", lines=2, interactive=False)
             video_name = gr.Markdown("等待开始…")
             progress_lbl = gr.Markdown("")
-            gallery = gr.Gallery(label="帧预览（按时间顺序）", columns=5, height=320, object_fit="contain")
+            with gr.Row():
+                columns_ctl = gr.Slider(1, 10, value=5, step=1, label="每行预览数")
+                height_ctl = gr.Slider(200, 900, value=600, step=50, label="预览高度（px）")
+            gallery = gr.Gallery(
+                label="帧预览（按时间顺序）", columns=5, height=600, object_fit="contain",
+            )
             with gr.Row():
                 btn_like = gr.Button("👍 喜欢", variant="primary")
                 btn_dislike = gr.Button("👎 不喜欢", variant="stop")
@@ -539,6 +545,15 @@ def build_ui():
             btn_skip.click(do_skip, inputs=label_inputs, outputs=label_outputs)
             btn_prev.click(do_prev, inputs=label_inputs, outputs=label_outputs)
             btn_export.click(do_export, inputs=label_inputs, outputs=[export_out])
+
+            def set_gallery_columns(columns):
+                return gr.update(columns=int(columns))
+
+            def set_gallery_height(height):
+                return gr.update(height=int(height))
+
+            columns_ctl.change(set_gallery_columns, inputs=[columns_ctl], outputs=[gallery])
+            height_ctl.change(set_gallery_height, inputs=[height_ctl], outputs=[gallery])
 
         # ---------------- Tab 3: 推理 ----------------
         with gr.Tab("🔍 推理"):
