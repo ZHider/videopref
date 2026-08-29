@@ -157,10 +157,3 @@ def load_checkpoint(path: Path | str, device=None) -> dict:
         for k, v in payload["model_state"].items():
             payload["model_state"][k] = v.to(device)
     return payload
-
-
-def build_model_from_config(config_: dict, device=None) -> VideoPreferenceModel:
-    """依据 Checkpoint 的 config 重建模型（权重由调用方 load_state_dict 载入）。"""
-    feature_dim = int(config_.get("feature_dim", config.DEFAULT_FEATURE_DIM))
-    model = VideoPreferenceModel(feature_dim=feature_dim)
-    return model

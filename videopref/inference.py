@@ -7,12 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import torch
-
-from . import config
-from .backbone import load_backbone
-from .features import extract_frame_features, frames_dir_to_paths
-from .model import VideoPreferenceModel, load_checkpoint
+from .predictor import Predictor
 
 
 def infer_frames(
@@ -36,41 +31,15 @@ def infer_frames(
           "training_stats": dict,
         }
     """
-    frames_dir = Path(frames_dir)
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # 1) 从 Checkpoint 读取所有超参数
-    payload = load_checkpoint(checkpoint_path, device=device)
-    ckpt_config = payload["config"]
-    label_mapping = payload.get("label_mapping", config.LABEL_MAPPING)
-    feature_dim = int(ckpt_config.get("feature_dim", config.DEFAULT_FEATURE_DIM))
-
-    # 2) 加载冻结骨干（用 Checkpoint 记录的 backbone_id/目录）
-    backbone_id = ckpt_config.get("backbone_id", config.DEFAULT_BACKBONE_ID)
-    if model_dir is None:
-        model_dir = config.DEFAULT_BACKBONE_DIR
-    backbone, processor, _ = load_backbone(model_dir, device=device)
-
-    # 3) 提取帧特征 + 聚合 + 分类
-    frame_paths = frames_dir_to_paths(frames_dir)
-    feats = extract_frame_features(backbone, processor, frame_paths, device, batch_size=batch_size)
-    if feats.shape[0] == 0:
-        raise ValueError(f"帧目录为空或无帧: {frames_dir}")
-
-    model = VideoPreferenceModel(feature_dim=feature_dim).to(device)
-    model.load_state_dict(payload["model_state"])
-    model.eval()
-
-    with torch.no_grad():
-        prob = model(feats.to(device).unsqueeze(0), mask=None)  # [1]
-        like_prob = float(prob.squeeze().cpu())
+    # 全部超参数从 Checkpoint 读取；骨干/模型只加载一次
+    predictor = Predictor(checkpoint_path, backbone_dir=model_dir, device=device)
+    like_prob, num_frames = predictor.predict_frames_dir(frames_dir, batch_size=batch_size)
 
     return {
-        "frames_dir": str(frames_dir),
-        "num_frames": int(feats.shape[0]),
+        "frames_dir": str(Path(frames_dir)),
+        "num_frames": num_frames,
         "like_probability": round(like_prob, 6),
-        "label_mapping": label_mapping,
-        "config": ckpt_config,
-        "training_stats": payload.get("training_stats", {}),
+        "label_mapping": predictor.label_mapping,
+        "config": predictor.config,
+        "training_stats": predictor.payload.get("training_stats", {}),
     }

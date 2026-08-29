@@ -1,4 +1,4 @@
-"""3.1 视频预处理与关键帧采样。
+"""3.1 视频预处理与关键帧采样（编排层）。
 
 抽帧策略（``sampling`` 参数）：
 - ``uniform``（默认）：**时长自适应均匀时间抽样**。帧数预算
@@ -6,9 +6,11 @@
   短视频少抽、长视频多抽、时间尽量平均，符合"整体观感"类偏好任务。
 - ``scene``：ffmpeg 场景变化检测（``select=gt(scene,THRESH)``），按内容突变抽帧；
   若未选出帧则回退到均匀抽样。
+- ``keyframe``：``-skip_frame nokey`` 只解 I 帧（快但粗糙），帧不足时回退均匀抽样。
 
-两个模式都自动剔除纯黑/纯白帧（灰度均值阈值可配置），
-输出按零填充编号命名（``0001.jpg`` ...），保证文件系统排序不丢失时序。
+具体抽样策略在 ``sampling.py``，ffmpeg 命令构建/解码在 ``ffmpeg.py``，本模块只负责
+编排：选策略 -> 纯黑白过滤 -> 零填充重新编号落盘。公共 API 为 ``extract_frames``
+与 ``extract_from_input``，供批量/标注/Gradio 复用。
 
 输出契约::
 
@@ -21,210 +23,25 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PIL import Image
-
 from . import config
-from .paths import FramesNamer, frame_filename, iter_video_files
+from .ffmpeg import probe_duration
+from .manifest import FramesNamer
+from .paths import frame_filename, iter_video_files
+from .sampling import (
+    adaptive_frame_budget,
+    is_black_or_white,
+    keyframe_sample,
+    scene_extract,
+    uniform_sample,
+    uniform_sample_list,
+)
 
 
-def ffmpeg_available() -> bool:
-    return shutil.which("ffmpeg") is not None
-
-
-# ---------------------------------------------------------------------------
-# ffmpeg 底层调用
-# ---------------------------------------------------------------------------
-# Windows 默认用 GBK 解码子进程输出，而 ffmpeg 输出含非 GBK 字节会抛 UnicodeDecodeError。
-# 统一用 utf-8 + errors="replace"，保证任何情况下都不会因解码崩溃。
-_SUBPROCESS_TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}
-
-
-def _probe_duration(video: Path) -> float | None:
-    """用 ffprobe 探测时长（秒）；失败返回 None。"""
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        return None
-    try:
-        out = subprocess.run(
-            [
-                ffprobe,
-                "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                str(video),
-            ],
-            capture_output=True,
-            **_SUBPROCESS_TEXT,
-            timeout=120,
-        )
-        if out.returncode == 0 and out.stdout.strip():
-            return float(out.stdout.strip())
-    except Exception:
-        return None
-    return None
-
-
-def _run_ffmpeg(cmd: list[str], timeout: int = 3600) -> subprocess.CompletedProcess:
-    """执行 ffmpeg；兼容新旧版本的 fps_mode/vsync 选项差异。"""
-    # 定位 -vsync 参数（若有），转成 -fps_mode（新版本）；失败则回退旧写法
-    if "-vsync" in cmd:
-        idx = cmd.index("-vsync")
-        mode = cmd[idx + 1]
-        new_cmd = cmd[:idx] + ["-fps_mode", mode] + cmd[idx + 2 :]
-        res = subprocess.run(new_cmd, capture_output=True, timeout=timeout, **_SUBPROCESS_TEXT)
-        if res.returncode == 0 or "Unrecognized option 'fps_mode'" not in (res.stderr or ""):
-            return res
-        # 旧版本不支持 fps_mode，回退 -vsync
-        return subprocess.run(cmd, capture_output=True, timeout=timeout, **_SUBPROCESS_TEXT)
-    return subprocess.run(cmd, capture_output=True, timeout=timeout, **_SUBPROCESS_TEXT)
-
-
-def _scale_filter(max_width: int) -> str:
-    """输出分辨率上限（640 等）：对分类无损，显著降低 JPEG 编码 CPU 与磁盘。0=不缩放。"""
-    if max_width and max_width > 0:
-        return f"scale='min({max_width},iw)':-2"
-    return ""
-
-
-def _uniform_sample_list(items: list, n: int) -> list:
-    """从有序列表均匀抽出至多 n 个（不按时间，按序号均分）。n<=0 或 len<=n 时原样返回。"""
-    if n <= 0 or len(items) <= n:
-        return items
-    if n == 1:
-        return [items[0]]
-    idx = [round(i * (len(items) - 1) / (n - 1)) for i in range(n)]
-    out, seen = [], set()
-    for i in idx:
-        if i not in seen:
-            seen.add(i)
-            out.append(items[i])
-    return out
-
-
-def _scene_extract(
-    video: Path,
-    out_dir: Path,
-    scene_threshold: float,
-    max_width: int = 0,
-    hwaccel: str | None = None,
-) -> int:
-    """ffmpeg 场景变化检测采样到 out_dir（cap_*.jpg）。返回写出的帧数。"""
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("未找到 ffmpeg，请先安装并加入 PATH。")
-    vf = ["select='gt(scene,{})'".format(scene_threshold)]
-    s = _scale_filter(max_width)
-    if s:
-        vf.append(s)
-    cmd = [ffmpeg, "-y"]
-    if hwaccel:
-        cmd += ["-hwaccel", hwaccel]
-    cmd += ["-i", str(video), "-vf", ",".join(vf), "-vsync", "vfr", "-q:v", "2", str(out_dir / "cap_%06d.jpg")]
-    res = _run_ffmpeg(cmd)
-    if res.returncode != 0:
-        produced = len(list(out_dir.glob("cap_*.jpg")))
-        # 场景检测未选出任何帧（非故障）：返回 0，交由调用方均匀采样回退
-        if produced == 0 and "Nothing was written" in res.stderr:
-            return 0
-        raise RuntimeError(f"ffmpeg 场景检测失败:\n{(res.stderr or '')[-2000:]}")
-    return len(list(out_dir.glob("cap_*.jpg")))
-
-
-def _keyframe_sample(
-    video: Path,
-    out_dir: Path,
-    max_width: int = 0,
-    hwaccel: str | None = None,
-) -> int:
-    """关键帧抽帧：``-skip_frame nokey`` 只解码 I 帧，跳过 P/B 帧。
-
-    解码量从"整段视频"骤降到"少数关键帧"，速度大幅提升、CPU 骤降。
-    帧间隔依赖编码器 GOP，不完全均匀，属"粗糙但快"模式。
-    """
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("未找到 ffmpeg，请先安装并加入 PATH。")
-    vf = []
-    s = _scale_filter(max_width)
-    if s:
-        vf.append(s)
-    cmd = [ffmpeg, "-y"]
-    if hwaccel:
-        cmd += ["-hwaccel", hwaccel]
-    cmd += ["-skip_frame", "nokey", "-i", str(video)]
-    if vf:
-        cmd += ["-vf", ",".join(vf)]
-    cmd += ["-vsync", "vfr", "-q:v", "2", str(out_dir / "cap_%06d.jpg")]
-    res = _run_ffmpeg(cmd)
-    if res.returncode != 0:
-        raise RuntimeError(f"ffmpeg 关键帧采样失败:\n{(res.stderr or '')[-2000:]}")
-    return len(list(out_dir.glob("cap_*.jpg")))
-
-
-def _uniform_sample(
-    video: Path,
-    out_dir: Path,
-    n_frames: int,
-    max_width: int = 0,
-    hwaccel: str | None = None,
-) -> int:
-    """均匀时间抽样：把视频时间轴均匀切成约 n_frames 帧。"""
-    ffmpeg = shutil.which("ffmpeg")
-    duration = _probe_duration(video)
-    if duration and duration > 0:
-        fps = max(0.05, n_frames / duration)
-    else:
-        # 时长未知（如无法 ffprobe）：按名义 30s 估算，结果仍受后续上限约束
-        fps = max(0.05, n_frames / 30.0)
-    vf = [f"fps={fps:.6f}"]
-    s = _scale_filter(max_width)
-    if s:
-        vf.append(s)
-    cmd = [ffmpeg, "-y"]
-    if hwaccel:
-        cmd += ["-hwaccel", hwaccel]
-    cmd += ["-i", str(video), "-vf", ",".join(vf), "-q:v", "2", str(out_dir / "cap_%06d.jpg")]
-    res = _run_ffmpeg(cmd)
-    if res.returncode != 0:
-        raise RuntimeError(f"ffmpeg 均匀采样失败:\n{(res.stderr or '')[-2000:]}")
-    return len(list(out_dir.glob("cap_*.jpg")))
-
-
-def adaptive_frame_budget(
-    video: Path,
-    fps_target: float = config.FPS_TARGET,
-    min_frames: int = config.MIN_FRAMES,
-    max_frames: int = config.DEFAULT_MAX_FRAMES,
-) -> int:
-    """按时长计算抽帧预算：``n = clip(round(dur × fps_target), min, max)``。"""
-    duration = _probe_duration(video)
-    if duration and duration > 0:
-        n = int(round(duration * fps_target))
-    else:
-        n = (min_frames + max_frames) // 2
-    return int(max(min_frames, min(max_frames, n)))
-
-
-def _is_black_or_white(frame_path: Path, black_thr: int, white_thr: int) -> bool:
-    """基于灰度均值判定纯黑/纯白（打开后即关闭，避免文件句柄泄漏）。"""
-    with Image.open(frame_path) as im:
-        gray = im.convert("L")
-        hist = gray.histogram()
-    total = sum(hist)
-    if total == 0:
-        return True
-    mean = sum(i * n for i, n in enumerate(hist)) / total
-    return mean <= black_thr or mean >= white_thr
-
-
-# ---------------------------------------------------------------------------
-# 主入口
-# ---------------------------------------------------------------------------
 def extract_frames(
     video: Path,
     out_dir: Path,
@@ -256,32 +73,39 @@ def extract_frames(
     for old in out_dir.glob(f"*{config.FRAME_EXT}"):
         old.unlink()
 
+    # 时长只探测一次，供预算计算与均匀采样复用（避免同一视频跑两次 ffprobe）
+    duration = probe_duration(video)
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         if sampling == "scene":
-            count = _scene_extract(video, tmp_dir, scene_threshold, max_width=max_width, hwaccel=hwaccel)
+            count = scene_extract(video, tmp_dir, scene_threshold, max_width=max_width, hwaccel=hwaccel)
             if count < 1:
-                budget = adaptive_frame_budget(video, fps_target, min_frames, max_frames)
-                _uniform_sample(video, tmp_dir, budget, max_width=max_width, hwaccel=hwaccel)
+                budget = adaptive_frame_budget(
+                    video, fps_target, min_frames, max_frames, duration=duration
+                )
+                uniform_sample(video, tmp_dir, budget, max_width=max_width, hwaccel=hwaccel, duration=duration)
         elif sampling == "keyframe":
-            count = _keyframe_sample(video, tmp_dir, max_width=max_width, hwaccel=hwaccel)
+            count = keyframe_sample(video, tmp_dir, max_width=max_width, hwaccel=hwaccel)
             if count < min_frames:
                 # 关键帧过少则回退均匀采样，保证帧数足够
-                budget = adaptive_frame_budget(video, fps_target, min_frames, max_frames)
-                _uniform_sample(video, tmp_dir, budget, max_width=max_width, hwaccel=hwaccel)
+                budget = adaptive_frame_budget(
+                    video, fps_target, min_frames, max_frames, duration=duration
+                )
+                uniform_sample(video, tmp_dir, budget, max_width=max_width, hwaccel=hwaccel, duration=duration)
         else:  # uniform（默认）
-            budget = adaptive_frame_budget(video, fps_target, min_frames, max_frames)
-            _uniform_sample(video, tmp_dir, budget, max_width=max_width, hwaccel=hwaccel)
+            budget = adaptive_frame_budget(video, fps_target, min_frames, max_frames, duration=duration)
+            uniform_sample(video, tmp_dir, budget, max_width=max_width, hwaccel=hwaccel, duration=duration)
 
         raw_frames = sorted(tmp_dir.glob("cap_*.jpg"))
-        kept = [p for p in raw_frames if not _is_black_or_white(p, black_threshold, white_threshold)]
+        kept = [p for p in raw_frames if not is_black_or_white(p, black_threshold, white_threshold)]
 
         # 过滤后过少则回退保留原始帧，避免空/过少结果（防御）
         if len(kept) < min_frames and raw_frames:
             kept = raw_frames
 
         # 均匀抽到最多 max_frames 帧（不按时间，按序号均分），避免只取开头
-        kept = _uniform_sample_list(kept, max_frames)
+        kept = uniform_sample_list(kept, max_frames)
         for idx, src in enumerate(kept, start=1):
             dst = out_dir / frame_filename(idx)
             shutil.copy2(src, dst)
@@ -318,8 +142,6 @@ def extract_from_input(
     -------
     所有输出文件夹列表。
     """
-    from concurrent.futures import ThreadPoolExecutor
-
     frames_root = Path(frames_root)
     frames_root.mkdir(parents=True, exist_ok=True)
 

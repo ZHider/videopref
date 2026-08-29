@@ -21,12 +21,12 @@ from pathlib import Path
 import torch
 
 from . import config
-from .backbone import load_backbone
 from .dataset import ensure_video_features
 from .frames import extract_from_input
 from .labeling import parse_video_list
-from .model import VideoPreferenceModel, load_checkpoint
-from .paths import frames_dir_for_video, iter_video_files, list_frame_files
+from .manifest import frames_dir_for_video
+from .paths import iter_video_files, list_frame_files
+from .predictor import Predictor
 
 
 def resolve_videos(input_path: Path | str, recursive: bool = True) -> list[Path]:
@@ -81,15 +81,8 @@ def run_batch_inference(
     if backbone_dir is None:
         backbone_dir = config.DEFAULT_BACKBONE_DIR
 
-    # 1) 骨干（只加载一次）
-    backbone, processor, _ = load_backbone(backbone_dir, device=device)
-
-    # 2) Checkpoint + 模型（只加载一次）
-    payload = load_checkpoint(checkpoint_path, device=device)
-    feature_dim = int(payload["config"].get("feature_dim", config.DEFAULT_FEATURE_DIM))
-    model = VideoPreferenceModel(feature_dim=feature_dim).to(device)
-    model.load_state_dict(payload["model_state"])
-    model.eval()
+    # 骨干 + Checkpoint + 模型（各只加载一次）
+    predictor = Predictor(checkpoint_path, backbone_dir=backbone_dir, device=device)
 
     # 3) 缺帧视频自动补抽（keyframe 快速模式）
     missing = [v for v in videos if not list_frame_files(frames_dir_for_video(v, frames_root))]
@@ -123,7 +116,9 @@ def run_batch_inference(
             progress((i + 1, total), desc=f"推理 {v.name}")
         try:
             frames_dir = frames_dir_for_video(v, frames_root)
-            feats = ensure_video_features(frames_dir, cache_dir, backbone, processor, device, batch_size)
+            feats = ensure_video_features(
+                frames_dir, cache_dir, predictor.backbone, predictor.processor, predictor.device, batch_size
+            )
             if feats.shape[0] == 0:
                 results.append(
                     {
@@ -138,8 +133,7 @@ def run_batch_inference(
                 if bar is not None:
                     bar.update(1)
                 continue
-            with torch.no_grad():
-                prob = float(model(feats.to(device).unsqueeze(0), mask=None).squeeze().cpu())
+            prob = predictor.predict_feats(feats)
             results.append(
                 {
                     "video_path": str(v),

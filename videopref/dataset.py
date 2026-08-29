@@ -18,9 +18,10 @@ import torch
 from torch.utils.data import Dataset
 
 from . import config
-from .augment import build_augment_transform, processor_image_size, processor_norm
+from .augment import build_augment_transform, processor_norm
 from .features import extract_frame_features, frames_dir_to_paths
-from .paths import feature_cache_path, frames_dir_for_video, video_key_of
+from .manifest import frames_dir_for_video
+from .paths import feature_cache_path, video_key_of
 
 
 # ---------------------------------------------------------------------------

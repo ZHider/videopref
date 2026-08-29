@@ -1,7 +1,8 @@
 import torch
 from videopref.backbone import load_backbone
 from videopref.config import DEFAULT_BACKBONE_DIR, DEFAULT_FEATURE_DIM
-from videopref.features import VideoPreferenceModel, MaskedAttentionPooling
+from videopref.features import extract_frame_features
+from videopref.model import MaskedAttentionPooling, VideoPreferenceModel
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -23,10 +24,8 @@ def main():
         Image.fromarray(arr).save(p)
         paths.append(p)
 
-    from videopref.features import extract_frame_features
     feats = extract_frame_features(model, processor, paths, device, batch_size=2)
     print("frame features shape =", tuple(feats.shape))  # expect [4, 768]
-
     # 池化 + 头
     vpm = VideoPreferenceModel(feature_dim=feature_dim).to(device)
     prob = vpm(feats.to(device).unsqueeze(0), mask=None)

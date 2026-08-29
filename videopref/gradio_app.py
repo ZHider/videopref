@@ -24,17 +24,18 @@ from . import config
 from .frames import extract_from_input
 from .inference import infer_frames
 from .labeling import (
+    advance,
     build_queue_from_frames,
     current_entry,
     extract_and_build_queue,
     load_progress,
     new_state,
     parse_video_list,
-    progress_text,
+    render_state,
+    sanitize_state,
     save_labels,
     save_progress,
 )
-from .paths import list_frame_files
 
 
 # ---------------------------------------------------------------------------
@@ -72,34 +73,8 @@ def _file_value_to_path(v) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
-# 标注：渲染 / 事件
+# 标注：事件（会话状态机逻辑在 labeling.py，这里只做 UI 绑定与持久化）
 # ---------------------------------------------------------------------------
-def _render(state: dict) -> tuple[str, str, list]:
-    """根据 state 渲染（视频名, 进度, 帧图列表）。"""
-    entry = current_entry(state)
-    if entry is None:
-        return "🎉 全部完成（或队列为空）", progress_text(state), []
-    return f"**{entry['key']}**　({entry['n_frames']} 帧)", progress_text(state), entry["frames"]
-
-
-def _sanitize_loaded_state(state: dict) -> dict:
-    """续标时校验队列条目：重建帧列表、剔除已失效目录。"""
-    queue = []
-    labels = {}
-    for e in state.get("queue", []):
-        frames_dir = Path(config.FRAMES_ROOT) / e["key"]
-        frames = [str(p) for p in list_frame_files(frames_dir)]
-        if not frames:
-            continue
-        e2 = dict(e)
-        e2["frames"] = frames
-        e2["n_frames"] = len(frames)
-        queue.append(e2)
-        if e["key"] in state.get("labels", {}):
-            labels[e["key"]] = state["labels"][e["key"]]
-    return {"queue": queue, "idx": min(int(state.get("idx", 0)), len(queue)), "labels": labels, "skipped": state.get("skipped", [])}
-
-
 def do_start_labeling(
     video_list_text,
     sampling,
@@ -134,7 +109,7 @@ def do_start_labeling(
 
     state = {"queue": queue, "idx": 0, "labels": {}, "skipped": []}
     save_progress(state)
-    name, prog, imgs = _render(state)
+    name, prog, imgs = render_state(state)
     summary = f"拆帧完成：{len(queue)} 个视频，开始标注。进度已保存到 {config.DATA_DIR / 'label_progress.json'}"
     return summary, name, prog, imgs, state
 
@@ -143,9 +118,9 @@ def do_resume(state):
     saved = load_progress()
     if saved is None:
         return "没有可续标的历史进度。", "", "", [], state
-    state = _sanitize_loaded_state(saved)
+    state = sanitize_state(saved, config.FRAMES_ROOT)
     save_progress(state)
-    name, prog, imgs = _render(state)
+    name, prog, imgs = render_state(state)
     return f"已恢复上次标注（{len(state['queue'])} 个视频）。", name, prog, imgs, state
 
 
@@ -156,46 +131,38 @@ def do_scan_all(state):
         return "frames/ 下没有含帧的子目录，请先拆帧。", "", "", [], state
     state = {"queue": queue, "idx": 0, "labels": {}, "skipped": []}
     save_progress(state)
-    name, prog, imgs = _render(state)
+    name, prog, imgs = render_state(state)
     return f"已载入 frames/ 下 {len(queue)} 个视频，开始标注。", name, prog, imgs, state
 
 
-def _advance(state, label=None):
-    """记录标签（若提供）并前进。"""
-    entry = current_entry(state)
-    if entry is not None and label is not None:
-        state["labels"][entry["key"]] = label
-    state["idx"] = int(state.get("idx", 0)) + 1
+def _commit(state) -> tuple[str, str, list, dict]:
+    """前进/回退后统一持久化并渲染。"""
     save_progress(state)
-    return state
+    name, prog, imgs = render_state(state)
+    return name, prog, imgs, state
 
 
 def do_like(state):
-    state = _advance(state, label=1)
-    name, prog, imgs = _render(state)
-    return name, prog, imgs, state
+    state = advance(state, label=1)
+    return _commit(state)
 
 
 def do_dislike(state):
-    state = _advance(state, label=0)
-    name, prog, imgs = _render(state)
-    return name, prog, imgs, state
+    state = advance(state, label=0)
+    return _commit(state)
 
 
 def do_skip(state):
     entry = current_entry(state)
     if entry is not None:
         state.setdefault("skipped", []).append(entry["key"])
-    state = _advance(state, label=None)
-    name, prog, imgs = _render(state)
-    return name, prog, imgs, state
+    state = advance(state, label=None)
+    return _commit(state)
 
 
 def do_prev(state):
     state["idx"] = max(0, int(state.get("idx", 0)) - 1)
-    save_progress(state)
-    name, prog, imgs = _render(state)
-    return name, prog, imgs, state
+    return _commit(state)
 
 
 def do_export(state):
