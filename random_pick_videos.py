@@ -8,8 +8,8 @@
 
 示例::
 
-    python random_pick_videos.py "F:\\GV" --count 50
-    python random_pick_videos.py "F:\\GV" --count 50 --seed 42 --output picked.txt
+    python random_pick_videos.py "F:\\Videos" --count 50
+    python random_pick_videos.py "F:\\Videos" --count 50 --seed 42 --output picked.txt
 """
 
 from __future__ import annotations
