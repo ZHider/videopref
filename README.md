@@ -117,6 +117,99 @@ frames/
 └── features_cache/               # 训练特征缓存
 ```
 
+## 模块依赖与流水线
+
+### 模块依赖树（按依赖层分组，单向无环）
+
+```
+visualpref/
+│
+├─ [叶子层]  不依赖任何包内模块（或只依赖 config）
+│   ├─ config.py      ← 根：无包内依赖，被几乎所有模块依赖
+│   ├─ paths.py       → config
+│   ├─ ffmpeg.py      → （纯 shutil/subprocess）
+│   ├─ pipeline.py    → （纯 queue/threading）
+│   ├─ augment.py     → （纯 torchvision）
+│   ├─ model.py       → config
+│   └─ backbone.py    → config
+│
+├─ [契约层]  依赖 items/paths/ffmpeg
+│   ├─ items.py       → config, paths(list_frame_files)
+│   ├─ sampling.py    → config, ffmpeg
+│   └─ manifest.py    → config, items, paths
+│
+├─ [核心业务层]
+│   ├─ features.py    → pipeline
+│   ├─ frames.py      → config, ffmpeg, items, manifest, paths, sampling
+│   ├─ labeling.py    → config, items, manifest, paths
+│   ├─ dataset.py     → config, augment, features, items, manifest, paths
+│   └─ predictor.py   → config, backbone, features, items, model
+│
+├─ [编排层]
+│   ├─ inference.py   → items, predictor
+│   ├─ batch_infer.py → config, dataset, frames, items, labeling, manifest, paths, predictor
+│   └─ train.py       → config, augment, backbone, dataset, model
+│
+└─ [UI 层]  gradio_app → 各 Tab
+    └─ ui/
+        ├─ common.py      → config, items
+        ├─ extract_tab.py → config, frames, items, labeling, common
+        ├─ label_tab.py   → config, labeling
+        ├─ infer_tab.py   → config, inference, items, common
+        ├─ batch_tab.py   → config, batch_infer, labeling, common
+        ├─ tools_tab.py   → common
+        └─ train_tab.py   → config, train, common
+```
+
+依赖方向为 `config → paths → items → manifest` 单向向上（再到业务层/编排层/UI），**无循环依赖**；
+`manifest → items → paths` 是"媒体 → 条目"契约的唯一实现链，训练/推理/标注/批量推理均据此定位条目。
+
+### 端到端流水线
+
+```
+┌───────────────── 摄入 ─────────────────┐
+媒体文件/文件夹/路径列表
+  → parse_media_list / iter_media_files
+  → FramesNamer.assign          (分配条目 key + 同名哈希去重)
+  → _make_ingest_handlers       (按 kind 分派)
+      ├─ video → extract_frames → ffmpeg 拆帧
+      │          (uniform/keyframe/scene + 纯黑白过滤 + 零填充编号)
+      └─ image → ingest_image   → 字节级复制(保原图/扩展名)
+  → frames/video/{key}/*.jpg  │  frames/image/{key}.{ext}
+  → _manifest.json  (media_path → {dir, kind, ext})
+        │
+        ▼
+┌───────────── 清洗/标注(人工) ────────────┐
+  frames/ → MediaItem.scan → 标注队列 → 👍/👎
+      → data/labels.json      (media_path, label, kind)
+      → data/label_progress.json  (续标)
+        │
+        ▼
+┌───────────── 特征 ──────────────────────┐
+  labels → load_labels → resolve_item (MediaItem)
+      → MediaItem.frame_paths    (视频=枚举*.jpg / 图片=单文件)
+      → ensure_features → 冻结 DINOv3 提取每帧 [CLS]
+      → features_cache/{video|image}/{key}.pt
+           └ 帧签名 .meta.json 失效校验(清洗后自动重提)
+        │
+        ▼
+┌───────────── 训练 ──────────────────────┐
+  build_train_val / build_augmented_train (分层划分)
+      → collate_features (padding + mask)
+      → PreferenceModel = MaskedAttentionPooling + MLP 头 (仅训池化+头)
+      → 择优保存 checkpoints/model.ckpt
+        │
+        ▼
+┌───────────── 推理 ──────────────────────┐
+  Predictor (骨干+模型一次加载)
+      → predict_item → extract_frame_features → like_probability
+      ├─ 单条: infer_tab / inference.infer_frames
+      └─ 批量: batch_infer.run_batch_inference (缺帧自动补摄) → predictions.csv
+```
+
+**视频与图片只在「摄入」阶段分叉**（ffmpeg 拆帧 vs 字节复制）；此后 `MediaItem.frame_paths` 统一成
+帧列表 → 逐帧特征 `[N, 768]`（图片 N=1）→ 池化/训练/推理全链路类型无关。
+
 ## 安装
 
 ### 前置条件
