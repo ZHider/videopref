@@ -1,7 +1,9 @@
 """特征提取管线。
 
 - ``extract_frame_features``：冻结 DINOv3 批量提取每帧 ``[CLS]`` 特征。
-- ``frames_dir_to_paths``：枚举帧文件（按文件名排序恢复时序）。
+
+帧枚举（目录/文件统一）属于 ``MediaItem.frame_paths``（见 ``items.py``），
+本模块不再关心"条目 -> 帧列表"的解析。
 
 CPU 预处理（解码/缩放/归一化）与 GPU 前向的重叠由 ``pipeline.prefetch_map``
 负责，本模块只关心"预处理单个 batch + 模型前向"。
@@ -16,10 +18,9 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from .paths import list_frame_files
 from .pipeline import prefetch_map
 
-__all__ = ["extract_frame_features", "frames_dir_to_paths"]
+__all__ = ["extract_frame_features"]
 
 
 @torch.no_grad()
@@ -67,17 +68,3 @@ def extract_frame_features(
         # pooler_output = sequence_output[:, 0, :] 即 [CLS] 特征
         feats.append(out.pooler_output.float().cpu())
     return torch.cat(feats, dim=0)
-
-
-def frames_dir_to_paths(item: Path) -> list[Path]:
-    """返回一个媒体条目对应的所有图片路径（按文件名排序恢复时序）。
-
-    - 目录（视频工作区 ``frames/video/<key>/``）：枚举 ``*.jpg`` 帧。
-    - 文件（图片 ``frames/image/<key>.<ext>``）：返回 ``[该文件]`` 单元素列表。
-    """
-    item = Path(item)
-    if item.is_dir():
-        return list_frame_files(item)
-    if item.is_file():
-        return [item]
-    return []

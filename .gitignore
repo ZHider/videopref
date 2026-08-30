@@ -35,3 +35,6 @@ data/label_progress.json
 .tmp/
 .modelscope/
 _*/
+# 契约测试工作目录 / 冒烟测试临时目录
+vp_verify_tmp/
+.smoke-tmp/

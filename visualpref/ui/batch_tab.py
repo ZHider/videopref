@@ -9,28 +9,29 @@ import gradio as gr
 
 from .. import config
 from ..batch_infer import run_batch_inference, write_results
-from ..labeling import parse_video_list
-from .common import list_checkpoints, progress_html, sampling_accordion
+from ..labeling import parse_media_list
+from .common import JobState, list_checkpoints, progress_html, sampling_accordion
 
-_batch_lock = threading.Lock()
-_batch = {
-    "running": False,
-    "cur": 0,
-    "total": 0,
-    "desc": "",
-    "rows": [],
-    "summary": "",
-    "done": False,
-    "error": None,
-}
+_batch = JobState(
+    {
+        "running": False,
+        "cur": 0,
+        "total": 0,
+        "desc": "",
+        "rows": [],
+        "summary": "",
+        "done": False,
+        "error": None,
+    }
+)
 
 
 def _build_batch_rows(results: list[dict]) -> list[list]:
     return [
         [
-            Path(r["video_path"]).name,
+            Path(r["media_path"]).name,
             "" if r["like_probability"] is None else f"{r['like_probability']:.6f}",
-            r["video_path"],
+            r["media_path"],
         ]
         for r in results
     ]
@@ -39,9 +40,7 @@ def _build_batch_rows(results: list[dict]) -> list[list]:
 def _on_batch_prog(pair, desc=None, **kwargs) -> None:
     """run_batch_inference 的进度回调：写入全局状态（供 Timer 轮询显示）。"""
     i, total = pair
-    with _batch_lock:
-        _batch["cur"], _batch["total"] = int(i), int(total)
-        _batch["desc"] = desc or ""
+    _batch.update(cur=int(i), total=int(total), desc=desc or "")
 
 
 def _batch_worker(paths, checkpoint_path, sampling, batch_size, workers, threads,
@@ -68,29 +67,25 @@ def _batch_worker(paths, checkpoint_path, sampling, batch_size, workers, threads
         if export_csv:
             out = write_results(results, config.DATA_DIR / "predictions.csv")
             summary += f" 已导出 CSV -> {out}"
-        with _batch_lock:
-            _batch.update(rows=_build_batch_rows(results), summary=summary, done=True)
+        _batch.update(rows=_build_batch_rows(results), summary=summary, done=True)
     except Exception as e:  # noqa: BLE001 - 反馈到 UI
-        with _batch_lock:
-            _batch.update(done=True, error=f"{e}")
+        _batch.update(done=True, error=f"{e}")
     finally:
-        with _batch_lock:
-            _batch["running"] = False
+        _batch.update(running=False)
 
 
 def do_batch_infer_start(video_list_text, sampling, fps_target, min_frames, max_frames,
                          scene_threshold, black_thresh, white_thresh, checkpoint_path,
                          backbone_dir, batch_size, workers, threads, max_width, export_csv):
     """启动后台批量推理（不阻塞 UI，进度经 Timer 轮询更新）。"""
-    paths = parse_video_list(video_list_text)
+    paths = parse_media_list(video_list_text)
     if not paths:
         return "未找到有效媒体路径（请每行一个视频或图片文件/文件夹路径，且存在）。"
     if not checkpoint_path:
         return "请选择 Checkpoint。"
-    with _batch_lock:
-        if _batch["running"]:
-            return "已有批量推理在进行中，请等待完成。"
-        _batch.update(running=True, cur=0, total=0, desc="", rows=[], summary="", done=False, error=None)
+    if _batch["running"]:
+        return "已有批量推理在进行中，请等待完成。"
+    _batch.update(running=True, cur=0, total=0, desc="", rows=[], summary="", done=False, error=None)
     threading.Thread(
         target=_batch_worker,
         args=(paths, checkpoint_path, sampling, batch_size, workers, threads,
@@ -106,8 +101,7 @@ def batch_tick():
     gr.Timer 串行触发，进度条由本函数每次重绘为 Tab 内 HTML 组件，
     稳定可见且不会像 gr.Progress 事件进度条那样重复或缺失。
     """
-    with _batch_lock:
-        st = dict(_batch)
+    st = _batch.snapshot()
     if st["running"]:
         html = progress_html(st["cur"], st["total"], st["desc"]) if st["total"] else progress_html(0, 1, "准备中")
         return "处理中…", [], html  # 实时进度由进度条显示，汇总框保持简短

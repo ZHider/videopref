@@ -9,6 +9,7 @@ import gradio as gr
 
 from .. import config
 from ..inference import infer_frames
+from ..items import MediaItem
 from .common import frame_item_choices, list_checkpoints
 
 
@@ -18,8 +19,8 @@ def do_infer(frames_key, checkpoint_path, backbone_dir):
     if not checkpoint_path:
         return None, json.dumps({"error": "请选择 Checkpoint"}, ensure_ascii=False, indent=2)
     try:
-        item_path = Path(config.FRAMES_ROOT) / frames_key
-        result = infer_frames(item_path, checkpoint_path, model_dir=backbone_dir)
+        item = MediaItem.from_entry_path(Path(config.FRAMES_ROOT) / frames_key)
+        result = infer_frames(item, checkpoint_path, model_dir=backbone_dir)
         return (
             result["like_probability"],
             json.dumps(result, ensure_ascii=False, indent=2),

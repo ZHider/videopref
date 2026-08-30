@@ -9,7 +9,8 @@ import gradio as gr
 
 from .. import config
 from ..frames import extract_from_input
-from ..labeling import parse_video_list
+from ..items import MediaItem
+from ..labeling import parse_media_list
 from .common import file_value_to_path, sampling_accordion
 
 
@@ -23,14 +24,14 @@ def do_extract(video_file, folder_path, video_list_text, sampling, fps_target, m
         elif folder_path.strip():
             input_src = Path(folder_path.strip())
         elif video_list_text.strip():
-            paths = parse_video_list(video_list_text)
+            paths = parse_media_list(video_list_text)
             if not paths:
                 return "路径列表中没有有效媒体（视频或图片）。", ""
             input_src = paths  # list 形式交给 extract_from_input
         else:
             return "请提供媒体文件、文件夹路径或媒体路径列表。", ""
 
-        out_dirs = extract_from_input(
+        out_items = extract_from_input(
             input_src,
             Path(config.FRAMES_ROOT),
             sampling=sampling,
@@ -43,9 +44,9 @@ def do_extract(video_file, folder_path, video_list_text, sampling, fps_target, m
             recursive=bool(recursive),
             progress=progress,
         )
-        lines = [f"处理完成，共 {len(out_dirs)} 个条目（视频工作区/图片文件）："]
-        lines += [f"  {d}" for d in out_dirs]
-        return "\n".join(lines), "\n".join(str(d) for d in out_dirs)
+        lines = [f"处理完成，共 {len(out_items)} 个条目（视频工作区/图片文件）："]
+        lines += [f"  {d.path}" for d in out_items]
+        return "\n".join(lines), "\n".join(str(d.path) for d in out_items)
     except Exception as e:  # 容错：将异常反馈到 UI
         return f"拆帧失败：{e}", ""
 
@@ -58,17 +59,13 @@ def do_clear_frames(confirmed: bool) -> str:
     if not root.is_dir():
         return "frames/ 目录不存在，无需清空。"
     dirs = files = removed = 0
-    for sub in (config.FRAMES_VIDEO_SUBDIR, config.FRAMES_IMAGE_SUBDIR):
-        subroot = root / sub
-        if not subroot.is_dir():
-            continue
-        for p in subroot.iterdir():
-            if p.is_dir():
-                shutil.rmtree(p, ignore_errors=True)
-                dirs += 1
-            elif p.is_file():
-                p.unlink(missing_ok=True)
-                files += 1
+    for p in MediaItem.iter_entry_paths(root):
+        if p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)
+            dirs += 1
+        else:
+            p.unlink(missing_ok=True)
+            files += 1
     mf = root / "_manifest.json"
     if mf.is_file():
         mf.unlink(missing_ok=True)

@@ -10,47 +10,43 @@ import gradio as gr
 
 from .. import config
 from ..train import run_training
+from .common import JobState
 
-_train_lock = threading.Lock()
-_train = {
-    "running": False,
-    "epoch": 0,
-    "total": 0,
-    "history": [],
-    "logs": [],
-    "done": False,
-    "error": None,
-    "best_path": None,
-    "final_path": None,
-}
+_train = JobState(
+    {
+        "running": False,
+        "epoch": 0,
+        "total": 0,
+        "history": [],
+        "logs": [],
+        "done": False,
+        "error": None,
+        "best_path": None,
+        "final_path": None,
+    }
+)
 
 
 def _train_worker(args) -> None:
     """后台线程执行 run_training，把进度/日志写入全局 _train。"""
 
     def _prog(epoch, total, metrics):
-        with _train_lock:
-            _train["epoch"] = epoch
-            _train["total"] = total
-            _train["history"].append(dict(metrics))
+        _train.update(epoch=epoch, total=total, history=_train["history"] + [dict(metrics)])
 
     def _log(msg):
-        with _train_lock:
-            _train["logs"].append(str(msg))
+        _train.update(logs=_train["logs"] + [str(msg)])
 
     try:
         result = run_training(args, progress=_prog, log=_log, use_tqdm=False)
-        with _train_lock:
-            _train["done"] = True
-            _train["best_path"] = str(result["best_path"])
-            _train["final_path"] = str(result["final_path"])
+        _train.update(
+            done=True,
+            best_path=str(result["best_path"]),
+            final_path=str(result["final_path"]),
+        )
     except Exception as e:  # noqa: BLE001 - 反馈到 UI
-        with _train_lock:
-            _train["done"] = True
-            _train["error"] = f"{e}"
+        _train.update(done=True, error=f"{e}")
     finally:
-        with _train_lock:
-            _train["running"] = False
+        _train.update(running=False)
 
 
 def do_train_start(labels_path, cache_dir, output_dir, epochs, lr, seed, batch_size, threads, val_fraction, augment, backbone_dir):
@@ -58,13 +54,12 @@ def do_train_start(labels_path, cache_dir, output_dir, epochs, lr, seed, batch_s
     labels_path = (labels_path or "").strip()
     if not labels_path or not Path(labels_path).is_file():
         return "labels.json 不存在，请填写正确路径。"
-    with _train_lock:
-        if _train["running"]:
-            return "已有训练在进行中，请等待完成。"
-        _train.update(
-            running=True, epoch=0, total=0, history=[], logs=[], done=False,
-            error=None, best_path=None, final_path=None,
-        )
+    if _train["running"]:
+        return "已有训练在进行中，请等待完成。"
+    _train.update(
+        running=True, epoch=0, total=0, history=[], logs=[], done=False,
+        error=None, best_path=None, final_path=None,
+    )
 
     args = SimpleNamespace(
         data=labels_path,
@@ -98,18 +93,7 @@ def _build_train_plot(history):
 
 def train_tick():
     """被 gr.Timer 周期调用，返回 (状态, 日志, 曲线, 完成提示)。"""
-    with _train_lock:
-        state = {
-            "running": _train["running"],
-            "epoch": _train["epoch"],
-            "total": _train["total"],
-            "history": list(_train["history"]),
-            "logs": list(_train["logs"]),
-            "done": _train["done"],
-            "error": _train["error"],
-            "best_path": _train["best_path"],
-            "final_path": _train["final_path"],
-        }
+    state = _train.snapshot()
 
     if state["running"]:
         status = f"训练中：epoch {state['epoch']}/{state['total']}"

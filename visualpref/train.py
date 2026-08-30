@@ -28,8 +28,8 @@ from tqdm import tqdm
 from . import config
 from .augment import processor_image_size
 from .backbone import load_backbone
-from .dataset import build_augmented_train, build_train_val, collate_videos, load_labels
-from .model import VideoPreferenceModel, default_config, save_checkpoint
+from .dataset import build_augmented_train, build_train_val, collate_features, load_labels
+from .model import PreferenceModel, default_config, save_checkpoint
 
 
 # ---------------------------------------------------------------------------
@@ -178,10 +178,10 @@ def run_training(args, progress=None, log=None, use_tqdm: bool = True) -> dict:
             seed=args.seed,
         )
     train_loader = torch.utils.data.DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_videos, num_workers=0
+        train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_features, num_workers=0
     )
     val_loader = torch.utils.data.DataLoader(
-        val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_videos, num_workers=0
+        val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_features, num_workers=0
     )
 
     _emit(f"[info] train samples = {len(train_ds)}, val samples = {len(val_ds)}")
@@ -192,7 +192,7 @@ def run_training(args, progress=None, log=None, use_tqdm: bool = True) -> dict:
         )
 
     # 模型 + 优化器（仅可训练参数）
-    model = VideoPreferenceModel(feature_dim=feature_dim).to(device)
+    model = PreferenceModel(feature_dim=feature_dim).to(device)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     _emit(f"[info] trainable params = {sum(p.numel() for p in trainable_params):,}")
     optimizer = torch.optim.Adam(trainable_params, lr=args.lr)

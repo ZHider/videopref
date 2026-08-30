@@ -1,7 +1,7 @@
 """标注工作流：扫描 ``frames/`` 下已摄入的媒体条目 -> UI 逐项标注 -> labels.json。
 
 设计：
-- 队列条目: ``{"video_path", "key", "frames", "n_frames", "kind"}``，``key`` 即
+- 队列条目: ``{"media_path", "key", "frames", "n_frames", "kind"}``，``key`` 即
   条目相对 ``frames/`` 根的子路径（如 ``video/foo`` / ``image/foo.png``），
   作为 labels 的唯一键；``kind`` 记录类型（视频/图片）以提升元数据密度。
 - 标注结果: ``{key: 0/1}``。
@@ -16,15 +16,15 @@ import json
 from pathlib import Path
 
 from . import config
-from .features import frames_dir_to_paths
+from .items import MediaItem
 from .manifest import load_manifest, manifest_dir_of
-from .paths import is_image, iter_media_files
+from .paths import iter_media_files
 
 
 # ---------------------------------------------------------------------------
 # 输入解析
 # ---------------------------------------------------------------------------
-def parse_video_list(text: str) -> list[Path]:
+def parse_media_list(text: str) -> list[Path]:
     """解析每行一个媒体路径的文本（视频或图片）；去重、过滤不存在的文件。
 
     支持每行一个**文件**或一个**文件夹**：
@@ -57,8 +57,8 @@ def build_queue_from_frames(frames_root: Path) -> list[dict]:
     """扫描 ``frames/`` 下所有已摄入媒体条目，直接构建标注队列（不重新拆帧/摄入）。
 
     - 视频工作区 ``frames/video/*``（目录）与图片 ``frames/image/*``（单文件）都纳入。
-    - 每条: ``{"video_path", "key", "frames", "n_frames", "kind"}``。
-      ``key`` 为条目相对根的子路径；``video_path`` 优先取 manifest 映射的真实路径。
+    - 每条: ``{"media_path", "key", "frames", "n_frames", "kind"}``。
+      ``key`` 为条目相对根的子路径；``media_path`` 优先取 manifest 映射的真实路径。
     """
     frames_root = Path(frames_root)
     manifest = load_manifest(frames_root)
@@ -70,26 +70,18 @@ def build_queue_from_frames(frames_root: Path) -> list[dict]:
             reverse.setdefault(d, []).append(vp)
 
     queue = []
-    for sub in (config.FRAMES_VIDEO_SUBDIR, config.FRAMES_IMAGE_SUBDIR):
-        subroot = frames_root / sub
-        if not subroot.is_dir():
-            continue
-        for item in sorted(subroot.iterdir()):
-            paths = frames_dir_to_paths(item)  # 目录→帧列表；文件→[该文件]
-            if not paths:
-                continue
-            key = f"{sub}/{item.name}"
-            vps = reverse.get(key, [])
-            video_path = vps[0] if vps else key
-            queue.append(
-                {
-                    "video_path": video_path,
-                    "key": key,
-                    "frames": [str(p) for p in paths],
-                    "n_frames": len(paths),
-                    "kind": "image" if is_image(item) else "video",
-                }
-            )
+    for item in MediaItem.scan(frames_root):
+        vps = reverse.get(item.key, [])
+        media_path = vps[0] if vps else item.key
+        queue.append(
+            {
+                "media_path": media_path,
+                "key": item.key,
+                "frames": [str(p) for p in item.frame_paths],
+                "n_frames": item.n_frames,
+                "kind": item.kind,
+            }
+        )
     return queue
 
 
@@ -97,16 +89,18 @@ def build_queue_from_frames(frames_root: Path) -> list[dict]:
 # 导出 / 进度持久化
 # ---------------------------------------------------------------------------
 def save_labels(labels_path: Path | str, queue: list[dict], labels: dict) -> int:
-    """把已标注结果写为 labels.json：``[{video_path, label, kind}]``。返回条数。
+    """把已标注结果写为 labels.json：``[{media_path, label, kind}]``。返回条数。
 
-    ``video_path`` 一律存为绝对路径，避免训练时 CWD 不同导致 manifest 解析失配；
-    ``kind`` 记录类型（video/image），提升元数据信息密度。
+    ``media_path`` 一律存为绝对路径，避免训练时 CWD 不同导致 manifest 解析失配；
+    兼容读取历史队列条目的 ``video_path`` 字段；``kind`` 记录类型（video/image）。
     """
     labels_path = Path(labels_path)
     labels_path.parent.mkdir(parents=True, exist_ok=True)
     items = [
         {
-            "video_path": str(Path(e["video_path"]).resolve()),
+            "media_path": str(
+                Path(e.get("media_path") or e.get("video_path") or e["key"]).resolve()
+            ),
             "label": int(labels[e["key"]]),
             "kind": e.get("kind", "video"),
         }
@@ -183,8 +177,8 @@ def sanitize_state(state: dict, frames_root: Path) -> dict:
     queue = []
     labels = {}
     for e in state.get("queue", []):
-        item = frames_root / e["key"]
-        frames = [str(p) for p in frames_dir_to_paths(item)]
+        item = MediaItem.from_entry_path(frames_root / e["key"], frames_root)
+        frames = [str(p) for p in item.frame_paths]
         if not frames:
             continue
         e2 = dict(e)

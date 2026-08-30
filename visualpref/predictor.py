@@ -1,9 +1,9 @@
 """推理预测器：一次性加载冻结骨干 + Checkpoint + 池化分类模型。
 
-单视频推理（``inference.py``）与批量推理（``batch_infer.py``）过去各自重复
+单条目推理（``inference.py``）与批量推理（``batch_infer.py``）过去各自重复
 "加载骨干 -> 读 Checkpoint -> 重建模型 -> load_state_dict -> eval" 的逻辑。
 本模块把这一整套收敛为 ``Predictor``：构造时只加载一次，之后可反复对
-逐帧特征（或帧目录）做预测。所有超参数一律从 Checkpoint 读取，禁止硬编码。
+逐帧特征（或媒体条目）做预测。所有超参数一律从 Checkpoint 读取，禁止硬编码。
 """
 
 from __future__ import annotations
@@ -14,19 +14,20 @@ import torch
 
 from . import config
 from .backbone import load_backbone
-from .features import extract_frame_features, frames_dir_to_paths
-from .model import VideoPreferenceModel, load_checkpoint
+from .features import extract_frame_features
+from .items import MediaItem
+from .model import PreferenceModel, load_checkpoint
 
 
 class Predictor:
-    """封装冻结骨干 + 池化分类模型，供单视频/批量推理复用。
+    """封装冻结骨干 + 池化分类模型，供单条目/批量推理复用。
 
     Attributes
     ----------
     device : torch.device
     backbone : nn.Module（已冻结、eval）
     processor : image processor
-    model : VideoPreferenceModel（池化 + 分类头，已载入权重、eval）
+    model : PreferenceModel（池化 + 分类头，已载入权重、eval）
     payload : 完整 checkpoint 字典（含 config / label_mapping / training_stats）
     """
 
@@ -52,7 +53,7 @@ class Predictor:
         self.backbone, self.processor, _ = load_backbone(backbone_dir, device=device)
 
         # 3) 池化 + 分类模型（只加载一次）
-        self.model = VideoPreferenceModel(feature_dim=self.feature_dim).to(device)
+        self.model = PreferenceModel(feature_dim=self.feature_dim).to(device)
         self.model.load_state_dict(self.payload["model_state"])
         self.model.eval()
 
@@ -84,11 +85,10 @@ class Predictor:
             raise ValueError("帧目录为空或无帧")
         return self.predict_feats(feats), int(feats.shape[0])
 
-    def predict_frames_dir(
+    def predict_item(
         self,
-        frames_dir: Path | str,
+        item: MediaItem,
         batch_size: int = 8,
     ) -> tuple[float, int]:
-        """对一帧目录实时提取特征并预测。"""
-        frame_paths = frames_dir_to_paths(Path(frames_dir))
-        return self.predict_frame_paths(frame_paths, batch_size=batch_size)
+        """对一媒体条目（视频=帧目录 / 图片=单文件）实时提取特征并预测。"""
+        return self.predict_frame_paths(item.frame_paths, batch_size=batch_size)

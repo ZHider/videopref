@@ -94,7 +94,7 @@ def main():
             encode_video(frames, videos_dir / name)
             labels.append(
                 {
-                    "video_path": str(videos_dir / name),
+                    "media_path": str(videos_dir / name),
                     "label": 1 if warm else 0,
                     "kind": "video",
                 }

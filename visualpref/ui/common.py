@@ -1,12 +1,42 @@
-"""Gradio UI 共享工具：条目/checkpoint 扫描、File 值解析、HTML 进度条、抽帧参数组件。"""
+"""Gradio UI 共享工具：条目/checkpoint 扫描、File 值解析、HTML 进度条、抽帧参数组件。
+
+另含 ``JobState``：供批量推理/训练 Tab 使用的线程安全单例任务状态
+（单进程 Gradio 足够；集中锁与字段访问，避免各处散乱操作模块级 dict）。
+"""
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import gradio as gr
 
 from .. import config
+from ..items import MediaItem
+
+
+class JobState:
+    """线程安全的任务状态容器（后台线程写、Timer 轮询读）。
+
+    用法：``state = JobState({"running": False, ...})``；后台线程
+    ``state.update(...)``，UI 线程 ``state.snapshot()`` 取一致快照。
+    """
+
+    def __init__(self, fields: dict):
+        self._lock = threading.Lock()
+        self._data = dict(fields)
+
+    def update(self, **kwargs) -> None:
+        with self._lock:
+            self._data.update(kwargs)
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return dict(self._data)
+
+    def __getitem__(self, key):
+        with self._lock:
+            return self._data[key]
 
 
 def list_checkpoints() -> list[str]:
@@ -19,20 +49,7 @@ def list_checkpoints() -> list[str]:
 
 def list_frame_items() -> list[str]:
     """扫描 frames/ 两个子区，返回已摄入条目 key（``video/foo`` / ``image/foo.png``）。"""
-    root = Path(config.FRAMES_ROOT)
-    if not root.is_dir():
-        return []
-    items = []
-    for sub in (config.FRAMES_VIDEO_SUBDIR, config.FRAMES_IMAGE_SUBDIR):
-        subroot = root / sub
-        if not subroot.is_dir():
-            continue
-        for p in sorted(subroot.iterdir()):
-            if p.is_dir() and any(f.suffix.lower() == ".jpg" for f in p.iterdir()):
-                items.append(f"{sub}/{p.name}")
-            elif p.is_file() and p.suffix.lower() in config.IMAGE_EXTENSIONS:
-                items.append(f"{sub}/{p.name}")
-    return items
+    return [it.key for it in MediaItem.scan(config.FRAMES_ROOT)]
 
 
 def frame_item_choices() -> list[tuple[str, str]]:

@@ -1,6 +1,6 @@
 """模型定义 + Checkpoint 规范。
 
-- 模型类（``MaskedAttentionPooling`` / ``PreferenceHead`` / ``VideoPreferenceModel``）
+- 模型类（``MaskedAttentionPooling`` / ``PreferenceHead`` / ``PreferenceModel``）
   与 Checkpoint 读写同处本模块，语义一致。
 - 超参数一律引用 ``config`` 常量，禁止重复硬编码。
 - Checkpoint 加载使用 ``weights_only=True``（payload 全为 dict+张量，安全且向后兼容）。
@@ -89,8 +89,12 @@ class PreferenceHead(nn.Module):
 # ---------------------------------------------------------------------------
 # 组合模型（池化 + 分类头）
 # ---------------------------------------------------------------------------
-class VideoPreferenceModel(nn.Module):
-    """仅含池化层与分类头的可训练模型。骨干冻结在外。"""
+class PreferenceModel(nn.Module):
+    """仅含池化层与分类头的可训练模型。骨干冻结在外。
+
+    同一模型同时服务视频与图片：输入永远是逐帧特征
+    （视频=多帧序列，图片=T=1 的单帧序列）。
+    """
 
     def __init__(self, feature_dim: int = config.DEFAULT_FEATURE_DIM):
         super().__init__()
@@ -128,7 +132,7 @@ def default_config(**overrides) -> dict:
 
 def save_checkpoint(
     path: Path,
-    model: VideoPreferenceModel,
+    model: PreferenceModel,
     config_: dict,
     label_mapping: dict,
     training_stats: dict,
