@@ -146,7 +146,17 @@ uv sync          # 安装 torch(cu128)/transformers/gradio/modelscope/sklearn �
 ## 快速上手（Gradio）
 
 ```bash
-uv run python app.py
+uv run python app.py          # 默认 127.0.0.1:7860
+```
+
+`app.py` 用 argparse 启动：`--server-name` / `--server-port` 显式解析，其余任意 `--key value`
+都会**原样透传**为 `**kwargs` 交给 `demo.launch`，因此 Gradio `Blocks.launch` 支持的所有
+参数都可用，无需改代码，例如：
+
+```bash
+uv run python app.py --server-port 7861 --share          # 自定义端口 + 公开分享
+uv run python app.py --auth "me:secret" --max-file-size "50mb"
+uv run python app.py --inbrowser                         # 启动后自动打开浏览器
 ```
 
 浏览器打开 `http://127.0.0.1:7860`：
@@ -278,6 +288,7 @@ uv run python app.py
 
 ## 变更记录
 
+- **v0.2.0**：更名为 `visual-pref` / `visualpref`；`app.py` 支持 argparse 透传任意 `--key value` 到 `demo.launch`。
 - **v0.1 初版**：DINOv3 骨干 + Masked Attention Pooling + MLP 头；拆帧（uniform/scene）/特征提取/训练/Gradio/Checkpoint 规范。
 - **规模扩展**：批量推理（一次加载骨干/模型、特征缓存、进度条、CSV 三列、坏文件容错）。
 - **重构**：抽出 `Predictor` 公共层；`frames.py` 拆出 `ffmpeg.py`/`sampling.py`；`paths.py` 拆出 `manifest.py`；`features.py` 抽 `pipeline.prefetch_map`；标注状态机下沉 `labeling.py`。
