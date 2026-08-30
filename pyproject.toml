@@ -1,6 +1,6 @@
 [project]
 name = "visual-pref"
-version = "0.3.0"
+version = "0.3.1"
 description = "个人媒体（视频/图片）喜好二分类器：冻结 DINOv3 骨干 + Masked Attention Pooling + 轻量 MLP 分类头"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
