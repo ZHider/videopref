@@ -95,7 +95,7 @@ frames/
 │   ├── inference.py              # 单条目推理
 │   ├── gradio_app.py             # Gradio 六 Tab 组合入口（薄层）
 │   └── ui/                       # Gradio 各 Tab 实现（按职责一模块一 Tab）
-│       ├── common.py             # 共享：checkpoint/条目扫描、File 解析、进度条、抽帧参数
+│       ├── common.py             # 共享：checkpoint/条目扫描、File 解析、进度条、抽帧参数、JobState
 │       ├── extract_tab.py        # 🎬 拆帧/摄入 + 清空
 │       ├── label_tab.py          # 🏷️ 标注
 │       ├── infer_tab.py          # 🔍 单条推理
@@ -109,7 +109,8 @@ frames/
 ├── move_low_score_files.py       # CLI：按 CSV 移动低分文件（工具 Tab 复用）
 ├── scripts/
 │   ├── make_synthetic_data.py    # 合成测试视频数据（暖色=喜欢 / 冷色=不喜欢）
-│   └── smoke_backbone.py         # 骨干冒烟测试
+│   ├── smoke_backbone.py         # 骨干冒烟测试
+│   └── verify_contract.py        # 数据契约回归测试（无 GPU/秒级）
 ├── models/                       # 下载的 DINOv3 权重
 ├── frames/                       # 摄入输出 + 人工清洗工作区（video/ 与 image/ 分区）
 ├── checkpoints/                  # 训练产出
