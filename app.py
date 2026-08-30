@@ -6,6 +6,9 @@
 因此可直接使用 Gradio ``Blocks.launch`` 支持的任何参数（如 ``--share``、
 ``--inbrowser``、``--auth "user:pass"``、``--allowed-path <path>`` ...）。
 
+已知需要整数的透传参数（``--max-threads``、``--width``、``--height``、
+``--max-file-size``）会自动 ``int`` 化，其余保持字符串原样。
+
 用法::
 
     python app.py                          # 默认 127.0.0.1:7860
@@ -28,6 +31,20 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# 透传参数中需要 int 化的键（对应 gradio.launch 的整数参数）；
+# 无法 int 化（如 "--max-file-size 50mb"）时回退为原字符串。
+_INT_PASS_THROUGH_KEYS = frozenset({"max_threads", "width", "height", "max_file_size"})
+
+
+def _coerce_passthrough(key: str, value) -> object:
+    if key in _INT_PASS_THROUGH_KEYS and isinstance(value, str):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
 def _pass_through(extras: list[str]) -> dict:
     """把 ``parse_known_args`` 捕获的未知参数（``--key value``）转成 kwargs，原样透传。
 
@@ -35,6 +52,7 @@ def _pass_through(extras: list[str]) -> dict:
     - ``--key value``  -> ``key=value``
     - ``--flag``（无值）-> ``flag=True``
     - 连字符转下划线：``--max-file-size`` -> ``max_file_size``
+    - 白名单键（见 ``_INT_PASS_THROUGH_KEYS``）自动 int 化。
     """
     kwargs: dict = {}
     i, n = 0, len(extras)
@@ -46,12 +64,12 @@ def _pass_through(extras: list[str]) -> dict:
         body = tok[2:]
         if "=" in body:
             k, _, v = body.partition("=")
-            kwargs[k.replace("-", "_")] = v
+            kwargs[k.replace("-", "_")] = _coerce_passthrough(k.replace("-", "_"), v)
             i += 1
             continue
         key = body.replace("-", "_")
         if i + 1 < n and not extras[i + 1].startswith("--"):
-            kwargs[key] = extras[i + 1]
+            kwargs[key] = _coerce_passthrough(key, extras[i + 1])
             i += 2
         else:
             kwargs[key] = True
