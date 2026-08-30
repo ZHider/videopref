@@ -57,16 +57,16 @@ frames/
 
 - `dir`：条目相对 `frames/` 根的子路径（视频=目录，图片=文件）。
 - `kind`：`"video"` | `"image"`。`ext`：源文件扩展名。
-- `video_path` 解析（`frames_dir_for_video`）优先查 manifest，命中返回条目路径（视频→目录、图片→文件）；未命中按扩展名回退到对应子区。
+- `media_path` 解析（`manifest.resolve_item` → `MediaItem`）优先查 manifest，命中返回条目（视频→帧目录、图片→单文件）；未命中按扩展名回退到对应子区。`MediaItem` 是"条目=目录(视频)|文件(图片)"的唯一显式契约（见 `items.py`）。
 
 **`data/labels.json`**：
 
 ```json
-[{"video_path": "D:/videos/a.mp4", "label": 1, "kind": "video"},
- {"video_path": "C:/pics/b.png",   "label": 0, "kind": "image"}]
+[{"media_path": "D:/videos/a.mp4", "label": 1, "kind": "video"},
+ {"media_path": "C:/pics/b.png",   "label": 0, "kind": "image"}]
 ```
 
-`video_path` 存绝对路径，`kind` 记录类型（训练/推理按 manifest 解析，不硬编码）。
+`media_path` 存绝对路径，`kind` 记录类型（训练/推理按 manifest 解析，不硬编码）；读取兼容旧字段名 `video_path`。
 
 **其他产物**：`data/label_progress.json`（标注续标进度）、`features_cache/`（按条目子路径 key 分区缓存：`video/foo.pt`、`image/foo.pt`）、`checkpoints/model.ckpt`（含 config/label_mapping/training_stats）。
 
@@ -77,12 +77,13 @@ frames/
 ├── visualpref/                   # 主包
 │   ├── config.py                 # 集中常量（路径/抽帧/EXTRACT_*/VIDEO+IMAGE_EXTENSIONS/子区名）
 │   ├── paths.py                  # 纯路径工具：sanitize、短哈希、帧/媒体枚举、is_image/is_media
-│   ├── manifest.py               # 媒体→条目元数据契约：FramesNamer + frames_dir_for_video
+│   ├── items.py                  # MediaItem：条目=目录(视频)|文件(图片) 的统一契约 + scan/枚举
+│   ├── manifest.py               # 媒体→条目元数据契约：FramesNamer + resolve_item
 │   ├── ffmpeg.py                 # ffmpeg 命令构建与执行（含新旧版本适配）
 │   ├── sampling.py               # 抽帧策略：uniform/keyframe/scene + 黑白过滤
 │   ├── frames.py                 # 摄入编排：extract_frames / extract_from_input / ingest_image
 │   ├── backbone.py               # 冻结 DINOv3 骨干加载（ModelScope 自动下载）
-│   ├── features.py               # 逐帧 [CLS] 特征提取；frames_dir_to_paths（目录/文件统一）
+│   ├── features.py               # 逐帧 [CLS] 特征提取（帧枚举见 MediaItem.frame_paths）
 │   ├── pipeline.py               # prefetch_map：CPU 预处理与 GPU 前向重叠
 │   ├── model.py                  # 模型类 + Checkpoint 读写（weights_only=True）
 │   ├── augment.py                # 训练期数据增强
@@ -181,7 +182,7 @@ uv run python app.py --inbrowser                         # 启动后自动打开
 **CLI 摄入/拆帧**（单文件或文件夹）：
 
 ```bash
-uv run python -c "from pathlib import Path; from visualpref.frames import extract_from_input; from visualpref import config; print(extract_from_input(Path('path/to/inputs'), Path(config.FRAMES_ROOT)))"
+uv run python -c "from pathlib import Path; from visualpref.frames import extract_from_input; from visualpref import config; items = extract_from_input(Path('path/to/inputs'), Path(config.FRAMES_ROOT)); print([str(i.path) for i in items])"
 ```
 
 **同名自动去重**：不同目录下同名视频 → `video/foo` 与 `video/foo_<hash>`；同名图片 → `image/foo.png` 与 `image/foo_<hash>.png`。映射写入 `_manifest.json`，训练/推理据此定位；同一媒体重复摄入幂等复用原条目。
@@ -207,17 +208,17 @@ uv run python train.py --data data/labels.json --cache-dir features_cache \
 **单条目**：「🔍 推理」Tab 选条目 + Checkpoint → `like_probability`；或脚本：
 
 ```bash
-uv run python -c "from pathlib import Path; from visualpref.inference import infer_frames; r = infer_frames(Path('frames/video/like000'), 'checkpoints/model.ckpt'); print(r['like_probability'])"
+uv run python -c "from visualpref.inference import infer_frames; from visualpref.items import MediaItem; from pathlib import Path; r = infer_frames(MediaItem.from_entry_path(Path('frames/video/like000')), 'checkpoints/model.ckpt'); print(r['like_probability'])"
 ```
 
 **批量**：「⚡ 批量推理」Tab 粘贴路径列表 + Checkpoint；或 CLI：
 
 ```bash
-uv run python infer_batch.py --videos data/video_list.txt --checkpoint checkpoints/model.ckpt \
+uv run python infer_batch.py --media data/media_list.txt --checkpoint checkpoints/model.ckpt \
     --output predictions.csv --sampling keyframe --min-frames 4 --max-frames 32 --workers 4
 ```
 
-- `--videos`：`.txt`（每行一个媒体路径）或文件夹（递归扫描，视频+图片）；缺帧/未摄入的条目自动补抽/摄入。
+- `--media`（兼容旧名 `--videos`）：`.txt`（每行一个媒体路径）或文件夹（递归扫描，视频+图片）；缺帧/未摄入的条目自动补抽/摄入。
 - 输出 `predictions.csv`（utf-8-sig）：**文件名、喜好概率、文件全路径**（失败/无帧概率留空）。
 - 骨干与 Checkpoint 只加载一次；特征缓存带签名校验，重跑不重复提取；坏文件跳过不中断整批。
 
@@ -266,7 +267,7 @@ uv run python scripts/make_synthetic_data.py --n-like 12 --n-dislike 12 \
     --videos data/synthetic_videos --labels data/labels.json
 
 # 2) 拆帧（视频 -> frames/video/）
-uv run python -c "from pathlib import Path; from visualpref.frames import extract_from_input; from visualpref import config; print(extract_from_input(Path('data/synthetic_videos'), Path(config.FRAMES_ROOT)))"
+uv run python -c "from pathlib import Path; from visualpref.frames import extract_from_input; from visualpref import config; print([str(i.path) for i in extract_from_input(Path('data/synthetic_videos'), Path(config.FRAMES_ROOT))])"
 
 # 3) 训练
 uv run python train.py --data data/labels.json --cache-dir features_cache \
@@ -288,6 +289,7 @@ uv run python app.py
 
 ## 变更记录
 
+- **v0.3.0**：**MediaItem 统一条目契约**——新增 `items.py`（`MediaItem`：key/kind/path/frame_paths/scan），"条目=目录(视频)|文件(图片)"的隐式分支收敛为唯一显式实现；`frames_dir_to_paths`/`video_key_of`/`frames_dir_for_video`/`frames_key_for` 移除，`manifest.resolve_item`/`MediaItem.scan` 取代；`VideoPreferenceModel` → `PreferenceModel`（Checkpoint 结构不变）；labels.json 字段 `video_path` → `media_path`（读取兼容旧字段）；`parse_video_list` → `parse_media_list`；批量推理 CLI `--videos` 更名为 `--media`（旧名仍可用）；`app.py` 透传参数白名单自动 int 化（`--max-threads` 等）。
 - **v0.2.0**：更名为 `visual-pref` / `visualpref`；`app.py` 支持 argparse 透传任意 `--key value` 到 `demo.launch`。
 - **v0.1 初版**：DINOv3 骨干 + Masked Attention Pooling + MLP 头；拆帧（uniform/scene）/特征提取/训练/Gradio/Checkpoint 规范。
 - **规模扩展**：批量推理（一次加载骨干/模型、特征缓存、进度条、CSV 三列、坏文件容错）。
