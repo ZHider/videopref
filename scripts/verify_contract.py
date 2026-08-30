@@ -19,7 +19,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import visualpref.train as train_mod
 from visualpref.dataset import load_labels
+from visualpref.frames import _make_ingest_handlers
 from visualpref.items import MediaItem
 from visualpref.labeling import (
     build_queue_from_frames,
@@ -180,6 +182,42 @@ def _run_checks(root: Path) -> None:
     check("flag 与普通字符串", kw["share"] is True and kw["auth"] == "me:secret")
     kw2 = app_mod._pass_through(["--width=800"])
     check("= 形式 int 化", kw2["width"] == 800)
+
+    print("== frames._make_ingest_handlers 分派 ==")
+    handlers = _make_ingest_handlers(
+        sampling="uniform", scene_threshold=0.3, fps_target=0.5,
+        min_frames=2, max_frames=8, black_threshold=10, white_threshold=245,
+        max_width=640, image_max_width=0, hwaccel=None,
+    )
+    check("分派表含 video/image", set(handlers) == {"video", "image"})
+    src_img = root / "pic.png"
+    src_img.write_bytes(b"PNGDATA")
+    img_item = MediaItem.from_entry_path(frames_root / "image" / "pic.png", frames_root)
+    handlers["image"](src_img, img_item)
+    check("image 处理器字节级复制", img_item.path.read_bytes() == b"PNGDATA")
+
+    print("== train._maybe_save_best 择优 ==")
+    _saved = []
+
+    class _DummyModel:
+        def state_dict(self):
+            return {}
+
+    def _fake_save(path, model, cfg, lm, st):
+        _saved.append((str(path), dict(st)))
+
+    orig_save = train_mod.save_checkpoint
+    try:
+        train_mod.save_checkpoint = _fake_save
+        out_dir = root / "out"
+        ckpt_cfg = {"feature_dim": 768}
+        lm = {"like": 1}
+        bk, bp = train_mod._maybe_save_best(_DummyModel(), out_dir, ckpt_cfg, lm, 0.9, 0.1, 1, (-float("inf"), -float("inf")), None)
+        check("更高 auc 保存最佳", bk == (0.9, -0.1) and len(_saved) == 1)
+        bk2, bp2 = train_mod._maybe_save_best(_DummyModel(), out_dir, ckpt_cfg, lm, 0.7, 0.3, 2, bk, bp)
+        check("更低 auc 不覆盖", bk2 == bk and bp2 == bp and len(_saved) == 1)
+    finally:
+        train_mod.save_checkpoint = orig_save
 
 
 if __name__ == "__main__":

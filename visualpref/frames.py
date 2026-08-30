@@ -26,6 +26,7 @@ import shutil
 import sys
 import tempfile
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from PIL import Image
 
 from . import config
 from .ffmpeg import probe_duration
+from .items import MediaItem
 from .manifest import FramesNamer
 from .paths import frame_filename, iter_media_files
 from .sampling import (
@@ -148,6 +150,48 @@ def ingest_image(image: Path, target: Path, max_width: int = config.IMAGE_MAX_WI
     return target
 
 
+def _make_ingest_handlers(
+    *,
+    sampling: str,
+    scene_threshold: float,
+    fps_target: float,
+    min_frames: int,
+    max_frames: int,
+    black_threshold: int,
+    white_threshold: int,
+    max_width: int,
+    image_max_width: int,
+    hwaccel: str | None,
+) -> dict[str, Callable[[Path, MediaItem], None]]:
+    """构造 "媒体类型 -> 摄入处理器" 的分派表。
+
+    处理器签名 ``(media: Path, item: MediaItem) -> None``：把媒体写入其条目
+    （视频=ffmpeg 拆帧到工作区目录，图片=字节级复制为单文件）。后续新增媒体
+    类型只需在此注册一个新 kind 的处理器，``extract_from_input`` 主循环不变。
+    """
+
+    def _video(media: Path, item: MediaItem) -> None:
+        extract_frames(
+            media,
+            item.path,
+            sampling=sampling,
+            scene_threshold=scene_threshold,
+            fps_target=fps_target,
+            min_frames=min_frames,
+            max_frames=max_frames,
+            black_threshold=black_threshold,
+            white_threshold=white_threshold,
+            max_width=max_width,
+            hwaccel=hwaccel,
+        )
+
+    def _image(media: Path, item: MediaItem) -> None:
+        # 图片：摄入为单文件条目（默认保留原始分辨率/质量）
+        ingest_image(media, item.path, max_width=image_max_width)
+
+    return {"video": _video, "image": _image}
+
+
 def extract_from_input(
     input_path,
     frames_root: Path,
@@ -164,7 +208,7 @@ def extract_from_input(
     workers: int = config.EXTRACT_WORKERS,
     recursive: bool = True,
     progress=None,
-) -> list[Path]:
+) -> list[MediaItem]:
     """对媒体文件（视频或图片）、媒体文件夹或媒体路径列表进行处理。
 
     - 单个视频文件 -> ffmpeg 拆帧到 frames/video/{sanitized_stem}/
@@ -202,28 +246,23 @@ def extract_from_input(
     total = len(jobs)
     done = [0]
     done_lock = threading.Lock()  # 串行化进度上报，避免并发调用 gr.Progress 产生多个进度条
+    handlers = _make_ingest_handlers(
+        sampling=sampling,
+        scene_threshold=scene_threshold,
+        fps_target=fps_target,
+        min_frames=min_frames,
+        max_frames=max_frames,
+        black_threshold=black_threshold,
+        white_threshold=white_threshold,
+        max_width=max_width,
+        image_max_width=image_max_width,
+        hwaccel=hwaccel,
+    )
 
     def _one(job):
         media, item = job
         try:
-            if item.kind == "image":
-                # 图片：摄入为单文件条目（默认保留原始分辨率/质量）
-                ingest_image(media, item.path, max_width=image_max_width)
-            else:
-                # 视频：按抽样策略拆帧到工作区目录
-                extract_frames(
-                    media,
-                    item.path,
-                    sampling=sampling,
-                    scene_threshold=scene_threshold,
-                    fps_target=fps_target,
-                    min_frames=min_frames,
-                    max_frames=max_frames,
-                    black_threshold=black_threshold,
-                    white_threshold=white_threshold,
-                    max_width=max_width,
-                    hwaccel=hwaccel,
-                )
+            handlers[item.kind](media, item)
             result = item
         except Exception as e:
             # 单个坏文件不应中断整批：记录并跳过

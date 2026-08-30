@@ -101,6 +101,112 @@ def evaluate(model, loader, device) -> tuple[float, float]:
 # ---------------------------------------------------------------------------
 # 训练
 # ---------------------------------------------------------------------------
+def _resolve_device(args) -> torch.device:
+    """按 args.device 或 CUDA 可用性解析目标设备。"""
+    return torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
+
+
+def _configure_cpu(args, emit) -> None:
+    """限制 torch CPU 线程数上限，避免训练在 GPU 上时 CPU 自旋空转。"""
+    if getattr(args, "threads", 0) and args.threads > 0:
+        torch.set_num_threads(args.threads)
+        try:
+            torch.set_num_interop_threads(args.threads)
+        except RuntimeError:
+            pass  # interop 线程只能在并行工作开始前设置
+        emit(f"[info] torch threads = {torch.get_num_threads()} (CPU cap)")
+
+
+def _seed_all(seed: int) -> None:
+    """固定 Python / NumPy / PyTorch 随机种子（含 CUDA）。"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def _build_loaders(args, backbone, processor, device, image_size, emit) -> tuple:
+    """加载标注、构建 train/val 数据与 DataLoader，并做非空校验。
+
+    Returns
+    -------
+    (train_loader, val_loader)
+    """
+    labels = load_labels(args.data)
+    cache_dir = Path(args.cache_dir)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.augment:
+        train_ds, val_ds = build_augmented_train(
+            labels, cache_dir, backbone, processor, device,
+            val_fraction=args.val_fraction, seed=args.seed,
+            image_size=image_size, batch_size=args.batch_size,
+        )
+    else:
+        train_ds, val_ds = build_train_val(
+            labels, cache_dir, backbone, processor, device,
+            val_fraction=args.val_fraction, batch_size=args.batch_size, seed=args.seed,
+        )
+    train_loader = torch.utils.data.DataLoader(
+        train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_features, num_workers=0
+    )
+    val_loader = torch.utils.data.DataLoader(
+        val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_features, num_workers=0
+    )
+
+    emit(f"[info] train samples = {len(train_ds)}, val samples = {len(val_ds)}")
+    if len(train_ds) == 0:
+        raise RuntimeError(
+            "训练集为空：请检查 frames/video 与 frames/image 下是否有已摄入条目，"
+            "以及 labels.json 路径是否匹配 manifest。"
+        )
+    return train_loader, val_loader
+
+
+def _train_epoch(model, loader, optimizer, criterion, device, use_tqdm: bool, epoch: int, total: int) -> float:
+    """跑一个训练 epoch，返回平均 loss。"""
+    pbar = (
+        tqdm(loader, desc=f"Epoch {epoch}/{total}", leave=False)
+        if use_tqdm
+        else loader
+    )
+    running_loss, count = 0.0, 0
+    for feats, mask, labels in pbar:
+        feats = feats.to(device)
+        mask = mask.to(device)
+        labels = labels.float().to(device)
+        optimizer.zero_grad()
+        logits = model(feats, mask=mask, return_logits=True)
+        loss = criterion(logits, labels)
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item() * feats.shape[0]
+        count += feats.shape[0]
+        if use_tqdm:
+            pbar.set_postfix(loss=f"{running_loss / max(count, 1):.4f}")
+    return running_loss / max(count, 1)
+
+
+def _maybe_save_best(model, output_dir, ckpt_config, label_mapping, val_auc, val_loss, epoch, best_key, best_path) -> tuple:
+    """按 ``(val_auc, -val_loss)`` 联合择优，命中则保存最佳 Checkpoint。
+
+    Returns
+    -------
+    (best_key, best_path) 更新后的组合。
+    """
+    cur_key = (val_auc, -val_loss) if val_auc is not None else (float("-inf"), -val_loss)
+    if cur_key > best_key:
+        stats = {"epoch": epoch, "val_loss": val_loss}
+        if val_auc is not None:
+            stats["val_auc"] = val_auc
+        best_path = output_dir / config.CHECKPOINT_FILENAME
+        save_checkpoint(best_path, model, ckpt_config, label_mapping, stats)
+        return cur_key, best_path
+    return best_key, best_path
+
+
 def run_training(args, progress=None, log=None, use_tqdm: bool = True) -> dict:
     """训练模型并返回结果。
 
@@ -123,25 +229,11 @@ def run_training(args, progress=None, log=None, use_tqdm: bool = True) -> dict:
         if log is not None:
             log(msg)
 
-    device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
+    device = _resolve_device(args)
     _emit(f"[info] device = {device}")
 
-    # 控制 CPU 线程数：训练主要在 GPU 上进行，torch 默认用满所有核会对极小算子
-    # 做线程调度/自旋，导致 CPU 打满而 GPU 空转。限制线程数可显著降低 CPU 占用。
-    if getattr(args, "threads", 0) and args.threads > 0:
-        torch.set_num_threads(args.threads)
-        try:
-            torch.set_num_interop_threads(args.threads)
-        except RuntimeError:
-            pass  # interop 线程只能在并行工作开始前设置
-        _emit(f"[info] torch threads = {torch.get_num_threads()} (CPU cap)")
-
-    # 种子
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    _configure_cpu(args, _emit)
+    _seed_all(args.seed)
 
     # 骨干（冻结）
     backbone, processor, feature_dim = load_backbone(args.backbone_dir, device=device)
@@ -149,47 +241,7 @@ def run_training(args, progress=None, log=None, use_tqdm: bool = True) -> dict:
     _emit(f"[info] backbone feature_dim = {feature_dim}, image_size = {image_size}")
 
     # 数据
-    labels = load_labels(args.data)
-    cache_dir = Path(args.cache_dir)
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    if args.augment:
-        train_ds, val_ds = build_augmented_train(
-            labels,
-            cache_dir,
-            backbone,
-            processor,
-            device,
-            val_fraction=args.val_fraction,
-            seed=args.seed,
-            image_size=image_size,
-            batch_size=args.batch_size,
-        )
-    else:
-        train_ds, val_ds = build_train_val(
-            labels,
-            cache_dir,
-            backbone,
-            processor,
-            device,
-            val_fraction=args.val_fraction,
-            batch_size=args.batch_size,
-            seed=args.seed,
-        )
-    train_loader = torch.utils.data.DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_features, num_workers=0
-    )
-    val_loader = torch.utils.data.DataLoader(
-        val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_features, num_workers=0
-    )
-
-    _emit(f"[info] train samples = {len(train_ds)}, val samples = {len(val_ds)}")
-    if len(train_ds) == 0:
-        raise RuntimeError(
-            "训练集为空：请检查 frames/video 与 frames/image 下是否有已摄入条目，"
-            "以及 labels.json 路径是否匹配 manifest。"
-        )
+    train_loader, val_loader = _build_loaders(args, backbone, processor, device, image_size, _emit)
 
     # 模型 + 优化器（仅可训练参数）
     model = PreferenceModel(feature_dim=feature_dim).to(device)
@@ -208,30 +260,14 @@ def run_training(args, progress=None, log=None, use_tqdm: bool = True) -> dict:
         feature_dim=feature_dim,
         max_frames=config.DEFAULT_MAX_FRAMES,
     )
+    output_dir = Path(args.output_dir)
 
     history: list[dict] = []
     for epoch in range(1, args.epochs + 1):
         model.train()
-        pbar = (
-            tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", leave=False)
-            if use_tqdm
-            else train_loader
+        train_loss = _train_epoch(
+            model, train_loader, optimizer, criterion, device, use_tqdm, epoch, args.epochs
         )
-        running_loss, count = 0.0, 0
-        for feats, mask, labels in pbar:
-            feats = feats.to(device)
-            mask = mask.to(device)
-            labels = labels.float().to(device)
-            optimizer.zero_grad()
-            logits = model(feats, mask=mask, return_logits=True)
-            loss = criterion(logits, labels)
-            loss.backward()
-            optimizer.step()
-            running_loss += loss.item() * feats.shape[0]
-            count += feats.shape[0]
-            if use_tqdm:
-                pbar.set_postfix(loss=f"{running_loss / max(count, 1):.4f}")
-        train_loss = running_loss / max(count, 1)
         scheduler.step()
 
         val_loss, val_auc = evaluate(model, val_loader, device)
@@ -245,15 +281,9 @@ def run_training(args, progress=None, log=None, use_tqdm: bool = True) -> dict:
         _emit(msg)
         history.append(dict(metrics))
 
-        # 按 (val_auc, -val_loss) 联合择优保存最佳；auc 平局时选择 loss 更低者
-        cur_key = (val_auc, -val_loss) if val_auc is not None else (float("-inf"), -val_loss)
-        if cur_key > best_key:
-            best_key = cur_key
-            stats = {"epoch": epoch, "val_loss": val_loss}
-            if val_auc is not None:
-                stats["val_auc"] = val_auc
-            best_path = output_dir / config.CHECKPOINT_FILENAME
-            save_checkpoint(best_path, model, ckpt_config, label_mapping, stats)
+        best_key, best_path = _maybe_save_best(
+            model, output_dir, ckpt_config, label_mapping, val_auc, val_loss, epoch, best_key, best_path
+        )
 
         if progress is not None:
             progress(epoch, args.epochs, dict(metrics))
