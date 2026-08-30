@@ -57,6 +57,30 @@ def iter_video_files(folder: Path, recursive: bool = True) -> list[Path]:
     return sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in exts)
 
 
+def is_video(path: Path) -> bool:
+    """按扩展名判断是否为视频文件。"""
+    return Path(path).suffix.lower() in config.VIDEO_EXTENSIONS
+
+
+def is_image(path: Path) -> bool:
+    """按扩展名判断是否为图片文件。"""
+    return Path(path).suffix.lower() in config.IMAGE_EXTENSIONS
+
+
+def is_media(path: Path) -> bool:
+    """按扩展名判断是否为媒体文件（视频或图片）。"""
+    return Path(path).suffix.lower() in config.MEDIA_EXTENSIONS
+
+
+def iter_media_files(folder: Path, recursive: bool = True) -> list[Path]:
+    """枚举文件夹下的媒体文件（视频 + 图片）；``recursive=True`` 时递归扫描。"""
+    folder = Path(folder)
+    exts = config.MEDIA_EXTENSIONS
+    if recursive:
+        return sorted(p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in exts)
+    return sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in exts)
+
+
 def frame_filename(index: int, width: int = config.FRAME_FILENAME_WIDTH) -> str:
     """生成零填充编号文件名，如 ``0001.jpg``。"""
     return f"{index:0{width}d}{config.FRAME_EXT}"
@@ -68,6 +92,15 @@ def feature_cache_path(cache_dir: Path, video_key: str, suffix: str = ".pt") -> 
 
 
 def video_key_of(frames_dir: Path) -> str:
-    """由 frames 子目录名生成稳定缓存键（与 sanitize 保持一致）。"""
-    return frames_dir.name
+    """由媒体条目路径生成稳定缓存键。
+
+    键为条目相对 ``frames/`` 根的子路径（如 ``video/foo``、``image/foo.png``），
+    保证视频与图片同 basename 时不互相覆盖缓存。无法相对根时回退为
+    ``父目录名/条目名``，避免自定义 frames_root 下 key 冲突。
+    """
+    p = Path(frames_dir)
+    try:
+        return p.relative_to(config.FRAMES_ROOT).as_posix()
+    except ValueError:
+        return f"{p.parent.name}/{p.name}"
 

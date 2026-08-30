@@ -7,7 +7,7 @@
         --output-dir ./checkpoints --epochs 100 --lr 1e-3 --seed 42
 """
 
-from videopref.train import main
+from visualpref.train import main
 
 if __name__ == "__main__":
     main()

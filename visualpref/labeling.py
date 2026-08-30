@@ -1,12 +1,13 @@
-"""标注工作流：扫描 ``frames/`` 下已拆帧目录 -> UI 逐视频标注 -> labels.json。
+"""标注工作流：扫描 ``frames/`` 下已摄入的媒体条目 -> UI 逐项标注 -> labels.json。
 
 设计：
-- 队列条目: ``{"video_path", "key", "frames", "n_frames"}``，``key`` 即
-  ``frames/`` 下的目录名（同名视频会带 hash 后缀），作为 labels 的唯一键。
+- 队列条目: ``{"video_path", "key", "frames", "n_frames", "kind"}``，``key`` 即
+  条目相对 ``frames/`` 根的子路径（如 ``video/foo`` / ``image/foo.png``），
+  作为 labels 的唯一键；``kind`` 记录类型（视频/图片）以提升元数据密度。
 - 标注结果: ``{key: 0/1}``。
 - 进度持久化到 ``data/label_progress.json``，支持中断续标。
-- 拆帧由独立的「拆帧」入口（``frames.extract_frames``/``extract_from_input``）
-  完成，本模块只负责从已有帧目录构建队列，不再拆帧。
+- 拆帧/摄入由独立的「拆帧」入口（``frames.extract_frames``/``extract_from_input``）
+  完成，本模块只负责从已有条目构建队列，不再拆帧。
 """
 
 from __future__ import annotations
@@ -15,19 +16,20 @@ import json
 from pathlib import Path
 
 from . import config
-from .manifest import load_manifest
-from .paths import iter_video_files, list_frame_files
+from .features import frames_dir_to_paths
+from .manifest import load_manifest, manifest_dir_of
+from .paths import is_image, iter_media_files
 
 
 # ---------------------------------------------------------------------------
 # 输入解析
 # ---------------------------------------------------------------------------
 def parse_video_list(text: str) -> list[Path]:
-    """解析每行一个视频路径的文本；去重、过滤不存在的文件。
+    """解析每行一个媒体路径的文本（视频或图片）；去重、过滤不存在的文件。
 
     支持每行一个**文件**或一个**文件夹**：
-    - 文件：直接收录（若存在）。
-    - 文件夹：递归扫描其下所有视频文件。
+    - 文件：直接收录（若存在；视频与图片均可）。
+    - 文件夹：递归扫描其下所有媒体文件（视频 + 图片）。
     """
     paths: list[Path] = []
     seen: set[str] = set()
@@ -37,8 +39,8 @@ def parse_video_list(text: str) -> list[Path]:
             continue
         p = Path(line)
         if p.is_dir():
-            # 文件夹：递归展开为视频文件
-            for vp in iter_video_files(p, recursive=True):
+            # 文件夹：递归展开为媒体文件
+            for vp in iter_media_files(p, recursive=True):
                 if str(vp) not in seen:
                     seen.add(str(vp))
                     paths.append(vp)
@@ -52,38 +54,42 @@ def parse_video_list(text: str) -> list[Path]:
 # 队列构建（从已拆帧目录，不重新拆帧）
 # ---------------------------------------------------------------------------
 def build_queue_from_frames(frames_root: Path) -> list[dict]:
-    """扫描 ``frames/`` 下所有含帧的子目录，直接构建标注队列（不重新拆帧）。
+    """扫描 ``frames/`` 下所有已摄入媒体条目，直接构建标注队列（不重新拆帧/摄入）。
 
-    - 每个子目录对应一个待标注视频。
-    - ``video_path`` 优先取 manifest 中映射的真实路径（若有），否则用目录名
-      （训练解析帧目录时，目录名经 sanitize 即可回落到自身，保证一致）。
+    - 视频工作区 ``frames/video/*``（目录）与图片 ``frames/image/*``（单文件）都纳入。
+    - 每条: ``{"video_path", "key", "frames", "n_frames", "kind"}``。
+      ``key`` 为条目相对根的子路径；``video_path`` 优先取 manifest 映射的真实路径。
     """
     frames_root = Path(frames_root)
     manifest = load_manifest(frames_root)
-    # dir name -> 可能的真实 video_path 列表
+    # 条目子路径 -> 可能的真实媒体路径列表
     reverse: dict[str, list[str]] = {}
-    for vp, dn in manifest.items():
-        reverse.setdefault(dn, []).append(vp)
+    for vp, val in manifest.items():
+        d = manifest_dir_of(val)
+        if d:
+            reverse.setdefault(d, []).append(vp)
 
     queue = []
-    if not frames_root.is_dir():
-        return queue
-    for d in sorted(frames_root.iterdir()):
-        if not d.is_dir():
+    for sub in (config.FRAMES_VIDEO_SUBDIR, config.FRAMES_IMAGE_SUBDIR):
+        subroot = frames_root / sub
+        if not subroot.is_dir():
             continue
-        frames = [str(p) for p in list_frame_files(d)]
-        if not frames:
-            continue
-        vps = reverse.get(d.name, [])
-        video_path = vps[0] if vps else d.name
-        queue.append(
-            {
-                "video_path": video_path,
-                "key": d.name,
-                "frames": frames,
-                "n_frames": len(frames),
-            }
-        )
+        for item in sorted(subroot.iterdir()):
+            paths = frames_dir_to_paths(item)  # 目录→帧列表；文件→[该文件]
+            if not paths:
+                continue
+            key = f"{sub}/{item.name}"
+            vps = reverse.get(key, [])
+            video_path = vps[0] if vps else key
+            queue.append(
+                {
+                    "video_path": video_path,
+                    "key": key,
+                    "frames": [str(p) for p in paths],
+                    "n_frames": len(paths),
+                    "kind": "image" if is_image(item) else "video",
+                }
+            )
     return queue
 
 
@@ -91,14 +97,19 @@ def build_queue_from_frames(frames_root: Path) -> list[dict]:
 # 导出 / 进度持久化
 # ---------------------------------------------------------------------------
 def save_labels(labels_path: Path | str, queue: list[dict], labels: dict) -> int:
-    """把已标注结果写为 labels.json：``[{video_path, label}]``。返回条数。
+    """把已标注结果写为 labels.json：``[{video_path, label, kind}]``。返回条数。
 
-    ``video_path`` 一律存为绝对路径，避免训练时 CWD 不同导致 manifest 解析失配。
+    ``video_path`` 一律存为绝对路径，避免训练时 CWD 不同导致 manifest 解析失配；
+    ``kind`` 记录类型（video/image），提升元数据信息密度。
     """
     labels_path = Path(labels_path)
     labels_path.parent.mkdir(parents=True, exist_ok=True)
     items = [
-        {"video_path": str(Path(e["video_path"]).resolve()), "label": int(labels[e["key"]])}
+        {
+            "video_path": str(Path(e["video_path"]).resolve()),
+            "label": int(labels[e["key"]]),
+            "kind": e.get("kind", "video"),
+        }
         for e in queue
         if e["key"] in labels
     ]
@@ -158,11 +169,12 @@ def progress_text(state: dict) -> str:
 # 标注会话状态机（纯逻辑，无 UI 依赖）
 # ---------------------------------------------------------------------------
 def render_state(state: dict) -> tuple[str, str, list]:
-    """根据 state 渲染（标题, 进度文本, 帧图路径列表）。"""
+    """根据 state 渲染（标题, 进度文本, 帧图路径列表）。标题带类型图标。"""
     entry = current_entry(state)
     if entry is None:
         return "🎉 全部完成（或队列为空）", progress_text(state), []
-    return f"**{entry['key']}**　({entry['n_frames']} 帧)", progress_text(state), entry["frames"]
+    icon = "🖼" if entry.get("kind") == "image" else "🎬"
+    return f"{icon} **{entry['key']}**　({entry['n_frames']} 帧)", progress_text(state), entry["frames"]
 
 
 def sanitize_state(state: dict, frames_root: Path) -> dict:
@@ -171,8 +183,8 @@ def sanitize_state(state: dict, frames_root: Path) -> dict:
     queue = []
     labels = {}
     for e in state.get("queue", []):
-        frames_dir = frames_root / e["key"]
-        frames = [str(p) for p in list_frame_files(frames_dir)]
+        item = frames_root / e["key"]
+        frames = [str(p) for p in frames_dir_to_paths(item)]
         if not frames:
             continue
         e2 = dict(e)

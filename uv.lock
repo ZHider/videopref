@@ -1276,7 +1276,7 @@ wheels = [
 ]
 
 [[package]]
-name = "videopref"
+name = "visual-pref"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

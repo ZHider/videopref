@@ -13,8 +13,15 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
 
-# frames/{sanitized_video_name}/0001.jpg ...  —— 拆帧输出 + 人工清洗工作区
+# frames/{sanitized_video_name}/0001.jpg ...  —— 拆帧输出 + 人工清洗工作区。
+# frames/ 下按媒体类型分区：
+#   frames/video/{key}/0001.jpg...  —— 视频拆帧工作区（一个视频一个目录）
+#   frames/image/{key}.{ext}        —— 图片工作区（一个图片一个文件，原样保留）
 FRAMES_ROOT: Path = PROJECT_ROOT / "frames"
+FRAMES_VIDEO_SUBDIR: str = "video"
+FRAMES_IMAGE_SUBDIR: str = "image"
+FRAMES_VIDEO_ROOT: Path = FRAMES_ROOT / FRAMES_VIDEO_SUBDIR
+FRAMES_IMAGE_ROOT: Path = FRAMES_ROOT / FRAMES_IMAGE_SUBDIR
 
 # 下载后的 DINOv3 骨干权重目录
 MODELS_DIR: Path = PROJECT_ROOT / "models"
@@ -57,6 +64,20 @@ FRAME_FILENAME_WIDTH: int = 4          # 零填充宽度，如 0001.jpg
 VIDEO_EXTENSIONS: frozenset[str] = frozenset(
     {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv", ".wmv"}
 )
+
+# 支持的图片扩展名。图片按"单帧视频"处理，全流程复用帧契约
+# （frames/{name}/0001.jpg -> 特征 -> 池化 -> 分类）。
+IMAGE_EXTENSIONS: frozenset[str] = frozenset(
+    {".jpg", ".jpeg", ".jfif", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+)
+
+# 媒体（视频 + 图片）扩展名合集，供扫描/分流使用
+MEDIA_EXTENSIONS: frozenset[str] = VIDEO_EXTENSIONS | IMAGE_EXTENSIONS
+
+# 图片摄入宽度上限：0=保留原始分辨率/像素（不缩放），保证图片无质量损失。
+# 仅在显式给出正数时才会缩放到宽度上限（DINOv3 只需 224，缩放对模型无损，
+# 但人工看图/清洗阶段保留原图更稳妥）。
+IMAGE_MAX_WIDTH: int = 0
 
 # 抽帧性能优化
 EXTRACT_MAX_WIDTH: int = 640       # 抽帧输出宽度上限（DINOv3 仅需 224，640 对分类无损，显著降 CPU/磁盘）

@@ -1,9 +1,10 @@
-"""批量离线推理：对成百上千个视频抽帧 -> 提取特征 -> 喜好概率。
+"""批量离线推理：对成百上千个媒体文件（视频/图片）抽帧或摄入 -> 提取特征 -> 喜好概率。
 
 设计要点（针对规模）：
-- 骨干与 Checkpoint 只加载**一次**，循环处理所有视频（避免逐视频重载 343MB 骨干）。
+- 骨干与 Checkpoint 只加载**一次**，循环处理所有媒体（避免逐文件重载 343MB 骨干）。
 - 复用 ``ensure_video_features`` 的**特征缓存**（带帧签名失效校验），重复运行不重复提取。
-- 抽帧默认 ``keyframe``（只解 I 帧，快但粗糙）；缺帧视频自动补抽。
+- 视频抽帧默认 ``keyframe``（只解 I 帧，快但粗糙）；缺帧自动补抽。
+  图片直接摄入为单帧（``ingest_image``），无抽帧开销。
 - 输出 CSV（utf-8-sig）：文件名、喜好概率、文件全路径三列。
 
 用法示例::
@@ -24,35 +25,44 @@ from . import config
 from .dataset import ensure_video_features
 from .frames import extract_from_input
 from .labeling import parse_video_list
-from .manifest import frames_dir_for_video, load_manifest
-from .paths import iter_video_files
+from .manifest import frames_dir_for_video, frames_key_for, load_manifest
+from .paths import is_media, iter_media_files
 from .predictor import Predictor
 
 
 def _frame_dirs_with_frames(frames_root: Path) -> set[str]:
-    """一次扫描 frames_root，返回所有含帧(.jpg)的子目录名集合。
+    """一次扫描 frames_root 的两个子区，返回所有已摄入条目 key 集合。
 
-    供缺帧判定查表使用：把"每个视频扫一次目录"降为"一次全量扫描 + 集合查表"。
+    - 视频工作区 ``frames/video/*``：目录含 *.jpg 帧。
+    - 图片 ``frames/image/*``：单文件（任何图片扩展名）。
+    供缺帧判定查表使用：把"每个媒体扫一次目录"降为"一次全量扫描 + 集合查表"。
     """
     root = Path(frames_root)
     if not root.is_dir():
         return set()
-    return {
-        p.name
-        for p in root.iterdir()
-        if p.is_dir() and any(f.suffix.lower() == config.FRAME_EXT for f in p.iterdir())
-    }
+    found: set[str] = set()
+    for sub in (config.FRAMES_VIDEO_SUBDIR, config.FRAMES_IMAGE_SUBDIR):
+        subroot = root / sub
+        if not subroot.is_dir():
+            continue
+        for item in subroot.iterdir():
+            if item.is_dir():
+                if any(f.suffix.lower() == config.FRAME_EXT for f in item.iterdir()):
+                    found.add(f"{sub}/{item.name}")
+            elif item.is_file() and item.suffix.lower() in config.IMAGE_EXTENSIONS:
+                found.add(f"{sub}/{item.name}")
+    return found
 
 
 def resolve_videos(input_path: Path | str, recursive: bool = True) -> list[Path]:
-    """把输入解析为视频路径列表：.txt(每行一个) / 文件夹(递归扫描) / 单个视频。"""
+    """把输入解析为媒体路径列表（视频 + 图片）：.txt(每行一个) / 文件夹 / 单个文件。"""
     p = Path(input_path)
     if p.is_file() and p.suffix.lower() == ".txt":
         return parse_video_list(p.read_text(encoding="utf-8"))
     if p.is_file():
-        return [p] if p.suffix.lower() in config.VIDEO_EXTENSIONS else []
+        return [p] if is_media(p) else []
     if p.is_dir():
-        return iter_video_files(p, recursive=recursive)
+        return iter_media_files(p, recursive=recursive)
     raise ValueError(f"输入既不是文件也不是文件夹: {input_path}")
 
 
@@ -73,12 +83,14 @@ def run_batch_inference(
     progress=None,
     show_progress: bool = True,
 ) -> list[dict]:
-    """对视频列表做批量推理，返回结果列表。
+    """对媒体列表（视频 + 图片）做批量推理，返回结果列表。
 
     ``threads``：torch CPU 线程数上限。推理时 GPU 前向与 CPU 预处理（解码/缩放）
     串行，torch 默认用满所有核会在 CPU 侧自旋，限制线程数可显著降低 CPU 占用。
     ``progress``：可选 ``(i, total)`` 回调（供程序化调用）；不传时用 tqdm 显示进度条
     （``show_progress=False`` 可关闭）。
+
+    视频缺帧自动抽帧；图片无既有帧时自动摄入为单帧（保留原始分辨率/质量）。
     """
     from tqdm import tqdm
 
@@ -108,7 +120,7 @@ def run_batch_inference(
     has_frames = _frame_dirs_with_frames(frames_root)
     missing = [
         v for v in videos
-        if frames_dir_for_video(v, frames_root, manifest=manifest).name not in has_frames
+        if frames_key_for(v, frames_root, manifest=manifest) not in has_frames
     ]
     if missing:
         if progress is not None:
@@ -206,7 +218,7 @@ def write_results(results: list[dict], output_path: Path | str) -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="批量抽帧 + 喜好推理")
-    p.add_argument("--videos", required=True, help="视频路径列表(.txt 每行一个) 或 文件夹")
+    p.add_argument("--videos", required=True, help="媒体路径列表(.txt 每行一个) 或 文件夹（视频/图片）")
     p.add_argument("--checkpoint", required=True, help="Checkpoint 路径")
     p.add_argument("--output", default=str(config.DATA_DIR / "predictions.csv"), help="输出 CSV 路径")
     p.add_argument("--cache-dir", default=str(config.FEATURES_CACHE_DIR), help="特征缓存目录")
@@ -228,7 +240,7 @@ def main(argv=None):
     videos = resolve_videos(args.videos)
     if args.limit and args.limit > 0:
         videos = videos[: args.limit]
-    print(f"[info] 待处理视频: {len(videos)} 个")
+    print(f"[info] 待处理媒体: {len(videos)} 个")
     if not videos:
         raise SystemExit("没有可处理的视频。")
     results = run_batch_inference(

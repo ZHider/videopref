@@ -6,7 +6,7 @@
     python app.py
 """
 
-from videopref.gradio_app import launch
+from visualpref.gradio_app import launch
 
 if __name__ == "__main__":
     launch()

@@ -1,13 +1,13 @@
 [project]
-name = "videopref"
+name = "visual-pref"
 version = "0.1.0"
-description = "个人视频喜好二分类器：冻结 DINOv3 骨干 + Masked Attention Pooling + 轻量 MLP 分类头"
+description = "个人媒体（视频/图片）喜好二分类器：冻结 DINOv3 骨干 + Masked Attention Pooling + 轻量 MLP 分类头"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 authors = [
     { name = "ZHider", email = "littlehider@gmail.com" },
 ]
-keywords = ["video", "preference", "classification", "dinov3", "pytorch", "gradio"]
+keywords = ["video", "image", "preference", "classification", "dinov3", "pytorch", "gradio"]
 dependencies = [
     "gradio",          # GUI（拆帧 / 标注 / 推理 / 批量推理 / 工具 / 训练）
     "modelscope>=1.39.1",

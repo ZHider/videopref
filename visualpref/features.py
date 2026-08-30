@@ -69,6 +69,15 @@ def extract_frame_features(
     return torch.cat(feats, dim=0)
 
 
-def frames_dir_to_paths(frames_dir: Path) -> list[Path]:
-    """枚举帧文件（按文件名排序恢复时序）。"""
-    return list_frame_files(frames_dir)
+def frames_dir_to_paths(item: Path) -> list[Path]:
+    """返回一个媒体条目对应的所有图片路径（按文件名排序恢复时序）。
+
+    - 目录（视频工作区 ``frames/video/<key>/``）：枚举 ``*.jpg`` 帧。
+    - 文件（图片 ``frames/image/<key>.<ext>``）：返回 ``[该文件]`` 单元素列表。
+    """
+    item = Path(item)
+    if item.is_dir():
+        return list_frame_files(item)
+    if item.is_file():
+        return [item]
+    return []

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""批量抽帧 + 喜好推理入口。
+"""批量抽帧/摄入 + 喜好推理入口（支持视频与图片）。
 
 用法::
 
@@ -7,7 +7,7 @@
         --output data/predictions.csv --sampling keyframe
 """
 
-from videopref.batch_infer import main
+from visualpref.batch_infer import main
 
 if __name__ == "__main__":
     main()

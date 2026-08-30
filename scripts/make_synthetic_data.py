@@ -92,7 +92,13 @@ def main():
             name = f"{prefix}{i:03d}.mp4"
             frames = make_frames(args.frames_per_video, warm, seed=args.seed + i)
             encode_video(frames, videos_dir / name)
-            labels.append({"video_path": str(videos_dir / name), "label": 1 if warm else 0})
+            labels.append(
+                {
+                    "video_path": str(videos_dir / name),
+                    "label": 1 if warm else 0,
+                    "kind": "video",
+                }
+            )
 
     gen(args.n_like, warm=True, prefix="like")
     gen(args.n_dislike, warm=False, prefix="dislike")

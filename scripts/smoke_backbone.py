@@ -1,8 +1,8 @@
 import torch
-from videopref.backbone import load_backbone
-from videopref.config import DEFAULT_BACKBONE_DIR, DEFAULT_FEATURE_DIM
-from videopref.features import extract_frame_features
-from videopref.model import VideoPreferenceModel
+from visualpref.backbone import load_backbone
+from visualpref.config import DEFAULT_BACKBONE_DIR, DEFAULT_FEATURE_DIM
+from visualpref.features import extract_frame_features
+from visualpref.model import VideoPreferenceModel
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

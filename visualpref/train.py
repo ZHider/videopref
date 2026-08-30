@@ -36,7 +36,7 @@ from .model import VideoPreferenceModel, default_config, save_checkpoint
 # 日志器：tensorboard / wandb 二选一，均不可用则静默
 # ---------------------------------------------------------------------------
 class Logger:
-    def __init__(self, log_dir=None, use_wandb=False, project="videopref"):
+    def __init__(self, log_dir=None, use_wandb=False, project="visual-pref"):
         self.writer = None
         self.wandb = None
         if use_wandb:
@@ -186,7 +186,10 @@ def run_training(args, progress=None, log=None, use_tqdm: bool = True) -> dict:
 
     _emit(f"[info] train samples = {len(train_ds)}, val samples = {len(val_ds)}")
     if len(train_ds) == 0:
-        raise RuntimeError("训练集为空：请检查 frames/ 下是否有清洗后的帧，以及 labels.json 路径是否匹配。")
+        raise RuntimeError(
+            "训练集为空：请检查 frames/video 与 frames/image 下是否有已摄入条目，"
+            "以及 labels.json 路径是否匹配 manifest。"
+        )
 
     # 模型 + 优化器（仅可训练参数）
     model = VideoPreferenceModel(feature_dim=feature_dim).to(device)

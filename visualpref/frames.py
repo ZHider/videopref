@@ -29,10 +29,12 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from PIL import Image
+
 from . import config
 from .ffmpeg import probe_duration
 from .manifest import FramesNamer
-from .paths import frame_filename, iter_video_files
+from .paths import frame_filename, is_image, iter_media_files
 from .sampling import (
     adaptive_frame_budget,
     is_black_or_white,
@@ -114,6 +116,38 @@ def extract_frames(
     return out_dir
 
 
+def ingest_image(image: Path, target: Path, max_width: int = config.IMAGE_MAX_WIDTH) -> Path:
+    """把图片摄入为 ``frames/image/`` 下的单文件条目，返回其路径。
+
+    图片在模型层等价于 T=1 的视频：单文件条目即可让整条下游链路
+    （清洗/标注/特征缓存/池化/训练/推理）原样工作（``frames_dir_to_paths``
+    对文件条目返回单元素列表）。
+
+    - 默认 ``max_width=0``：**原样复制**，保留原始分辨率、像素与扩展名
+      （零质量损失）。图片不再套用视频的 ``0001.jpg`` 命名，而是以
+      ``image/{名}.{原扩展名}`` 单独存放，作为一等公民。
+    - ``max_width>0`` 时缩放到宽度上限再存为 JPEG（仅在显式要求时，图片
+      默认不缩放以保质量）。
+    """
+    image = Path(image)
+    if not image.is_file():
+        raise FileNotFoundError(f"图片不存在: {image}")
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if max_width and max_width > 0:
+        dst = target.with_suffix(".jpg")
+        with Image.open(image) as im:
+            im = im.convert("RGB")
+            if im.width > max_width:
+                h = max(1, round(im.height * max_width / im.width))
+                im = im.resize((max_width, h), Image.LANCZOS)
+            im.save(dst, "JPEG", quality=95)
+        return dst
+    # 原样复制（字节级一致），保留原扩展名，零重编码质量损失
+    shutil.copy2(image, target)
+    return target
+
+
 def extract_from_input(
     input_path,
     frames_root: Path,
@@ -125,23 +159,27 @@ def extract_from_input(
     black_threshold: int = config.BLACK_FRAME_MEAN,
     white_threshold: int = config.WHITE_FRAME_MEAN,
     max_width: int = config.EXTRACT_MAX_WIDTH,
+    image_max_width: int = config.IMAGE_MAX_WIDTH,
     hwaccel: str | None = config.EXTRACT_HWACCEL,
     workers: int = config.EXTRACT_WORKERS,
     recursive: bool = True,
     progress=None,
 ) -> list[Path]:
-    """对视频文件、视频文件夹或视频路径列表进行拆帧。
+    """对媒体文件（视频或图片）、媒体文件夹或媒体路径列表进行处理。
 
-    - 单个视频文件 -> frames/{sanitized_stem}/
-    - 文件夹 -> 对其中每个视频文件分别输出到其子文件夹（``recursive=True`` 时递归所有子目录）
-    - 路径列表（list[Path]）-> 逐视频输出
+    - 单个视频文件 -> ffmpeg 拆帧到 frames/video/{sanitized_stem}/
+    - 单个图片文件 -> 摄入为单文件条目 frames/image/{sanitized_stem}{ext}
+      （``ingest_image``，默认原样保留）
+    - 文件夹 -> 对其下每个媒体文件分别输出到对应子区
+      （``recursive=True`` 时递归所有子目录）
+    - 路径列表（list[Path]）-> 逐项处理（视频拆帧 / 图片摄入）
 
-    ``workers``：并行拆帧的视频数（ffmpeg 为子进程，并行可缩短整批耗时；
+    ``workers``：并行处理的文件数（ffmpeg 为子进程，并行可缩短整批耗时；
     0/1=串行）。``progress`` 可选 ``progress((i, total), desc=...)``。
 
     Returns
     -------
-    所有输出文件夹列表。
+    所有条目路径列表（视频=工作区目录，图片=文件）。
     """
     frames_root = Path(frames_root)
     frames_root.mkdir(parents=True, exist_ok=True)
@@ -153,12 +191,12 @@ def extract_from_input(
         if input_path.is_file():
             sources = [input_path]
         elif input_path.is_dir():
-            sources = iter_video_files(input_path, recursive=recursive)
+            sources = iter_media_files(input_path, recursive=recursive)
         else:
             raise ValueError(f"输入既不是文件也不是文件夹: {input_path}")
 
-    # 同名视频去重：分配 + 解析统一由 paths.FramesNamer 处理。
-    # 先单线程分配好所有目录名（避免并行时同名视频的竞态），再并行拆帧。
+    # 同名媒体去重：分配 + 解析统一由 paths.FramesNamer 处理。
+    # 先单线程分配好所有目录名（避免并行时同名文件竞态），再并行处理。
     namer = FramesNamer(frames_root)
     jobs = [(v, namer.assign(v)) for v in sources]
     total = len(jobs)
@@ -166,25 +204,30 @@ def extract_from_input(
     done_lock = threading.Lock()  # 串行化进度上报，避免并发调用 gr.Progress 产生多个进度条
 
     def _one(job):
-        v, out_dir = job
+        v, item_path = job
         try:
-            extract_frames(
-                v,
-                out_dir,
-                sampling=sampling,
-                scene_threshold=scene_threshold,
-                fps_target=fps_target,
-                min_frames=min_frames,
-                max_frames=max_frames,
-                black_threshold=black_threshold,
-                white_threshold=white_threshold,
-                max_width=max_width,
-                hwaccel=hwaccel,
-            )
-            result = out_dir
+            if is_image(v):
+                # 图片：摄入为单文件条目（默认保留原始分辨率/质量）
+                ingest_image(v, item_path, max_width=image_max_width)
+            else:
+                # 视频：按抽样策略拆帧到工作区目录
+                extract_frames(
+                    v,
+                    item_path,
+                    sampling=sampling,
+                    scene_threshold=scene_threshold,
+                    fps_target=fps_target,
+                    min_frames=min_frames,
+                    max_frames=max_frames,
+                    black_threshold=black_threshold,
+                    white_threshold=white_threshold,
+                    max_width=max_width,
+                    hwaccel=hwaccel,
+                )
+            result = item_path
         except Exception as e:
             # 单个坏文件不应中断整批：记录并跳过
-            print(f"[warn] 拆帧失败，跳过 {v.name}: {e}", file=sys.stderr)
+            print(f"[warn] 处理失败，跳过 {v.name}: {e}", file=sys.stderr)
             result = None
         with done_lock:
             done[0] += 1

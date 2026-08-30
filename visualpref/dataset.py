@@ -66,6 +66,7 @@ def ensure_video_features(
     cache_dir.mkdir(parents=True, exist_ok=True)
     key = video_key_of(frames_dir)
     cache_path = feature_cache_path(cache_dir, key)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
 
     frame_paths = frames_dir_to_paths(frames_dir)
     signature = _frame_signature(frame_paths)
