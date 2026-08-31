@@ -9,7 +9,7 @@
 ## 特性
 
 - **全流程 GUI 化**：Gradio 六 Tab——拆帧/摄入、标注、推理、批量推理、工具、训练；训练与批量推理在后台线程运行 + 实时曲线/HTML 进度条，不阻塞界面。
-- **图片为一等公民**：图片以 `frames/image/` 下**单文件**独立存放（摄入时 center-crop 到 224×224 存 JPEG，与模型输入/视频帧一致；可 `IMAGE_MAX_WIDTH=0` 回退原样复制），与视频分区，元数据带 `kind` 类型。
+- **图片为一等公民**：图片以 `frames/image/` 下**单文件**独立存放（摄入时 center-crop 到 224×224 存 JPEG，与模型输入/视频帧一致；可 `IMAGE_SIZE=0` 回退原样复制），与视频分区，元数据带 `kind` 类型。
 - **CLI 保留**：`train.py`、`infer_batch.py`、`random_pick_videos.py`、`move_low_score_files.py` 命令行能力完整，可脚本化/批处理。
 - **三种抽帧模式**：`uniform`（时长自适应均匀，默认）、`keyframe`（只解 I 帧，快 ~10 倍）、`scene`（场景检测）；图片摄入不走 ffmpeg。
 - **特征缓存 + 帧签名失效校验**：清洗/重摄入后自动重提取，训练与推理严格一致、不重复计算。
@@ -270,7 +270,7 @@ uv run python app.py --inbrowser                         # 启动后自动打开
 
 ### 阶段一：摄入 + 清洗 + 标注
 
-1. **拆帧/摄入**（「🎬 拆帧」Tab）：提供媒体文件、文件夹或每行一个的路径列表。视频按所选抽帧模式拆帧到 `frames/video/{名}/`；**图片摄入**为 `frames/image/{名}.jpg`（默认 center-crop 到 224×224，与模型输入一致——喂模型时 processor 的 resize 退化为恒等、跳过昂贵缩放；`IMAGE_MAX_WIDTH=0` 可回退原样复制）。
+1. **拆帧/摄入**（「🎬 拆帧」Tab）：提供媒体文件、文件夹或每行一个的路径列表。视频按所选抽帧模式拆帧到 `frames/video/{名}/`；**图片摄入**为 `frames/image/{名}.jpg`（默认 center-crop 到 224×224，与模型输入一致——喂模型时 processor 的 resize 退化为恒等、跳过昂贵缩放；`IMAGE_SIZE=0` 可回退原样复制）。
 2. **人工清洗（可选）**：打开 `frames/video/{名}/` 删除低质帧；图片可替换 `frames/image/{名}.{扩展名}`。特征缓存带**帧签名校验**，清洗后自动重提取。
 3. **标注**（「🏷️ 标注」Tab）：点「标注 frames/ 全部已摄入媒体」或「继续上次标注」（进度存 `data/label_progress.json`）。逐项看图点 👍/👎/跳过/上一步；预览「每行预览数/高度」可调。完毕点「导出 labels.json」（label: 1=喜欢, 0=不喜欢，含 `kind`）。
 
@@ -339,7 +339,7 @@ uv run python move_low_score_files.py <csv> [-d 目标文件夹] [-t 阈值] [--
 | `keyframe`（推荐批量） | `-skip_frame nokey` 只解 I 帧 | **快 ~10 倍、CPU 骤降** |
 | `scene` | ffmpeg 场景检测（`gt(scene,阈值)`） | 中等 |
 
-其他：视频帧/图片统一 **center-crop 到 224×224**（与 DINOv3 输入一致，喂模型时 processor 的 resize 退化为恒等、跳过昂贵缩放；视频用 ffmpeg `crop+scale`，图片用 PIL center-crop）、自动剔除纯黑(<10)/纯白(>245)帧、并行处理 `--workers`、均匀封顶到 `max_frames`、递归扫描子目录、ffmpeg `-vsync`/`-fps_mode` 自动适配。**图片摄入不走 ffmpeg**：用 PIL 做 center-crop 到 224×224 存 JPEG，设为 `IMAGE_MAX_WIDTH=0` 可回退原样复制。
+其他：视频帧/图片统一 **center-crop 到 224×224**（与 DINOv3 输入一致，喂模型时 processor 的 resize 退化为恒等、跳过昂贵缩放；视频用 ffmpeg `crop+scale`，图片用 PIL center-crop）、自动剔除纯黑(<10)/纯白(>245)帧、并行处理 `--workers`、均匀封顶到 `max_frames`、递归扫描子目录、ffmpeg `-vsync`/`-fps_mode` 自动适配。**图片摄入不走 ffmpeg**：用 PIL 做 center-crop 到 224×224 存 JPEG，设为 `IMAGE_SIZE=0` 可回退原样复制。
 
 ## Checkpoint 规范
 

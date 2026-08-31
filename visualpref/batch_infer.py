@@ -53,7 +53,7 @@ def run_batch_inference(
     sampling: str = "keyframe",
     batch_size: int = 64,
     workers: int = config.EXTRACT_WORKERS,
-    size: int = config.EXTRACT_MAX_WIDTH,
+    size: int = config.EXTRACT_SIZE,
     min_frames: int = 4,
     max_frames: int = 32,
     threads: int = 8,
@@ -204,7 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--batch-size", type=int, default=16, help="特征提取 batch（配合流水线预取：batch 略小于单视频帧数时，CPU 预处理与 GPU 前向重叠最充分）")
     p.add_argument("--workers", type=int, default=config.EXTRACT_WORKERS, help="并行抽帧视频数")
     p.add_argument("--threads", type=int, default=8, help="torch CPU 线程数上限（降低 CPU 占用；0=不限制）")
-    p.add_argument("--size", type=int, default=config.EXTRACT_MAX_WIDTH, help="抽帧/摄入输出正方形边长（center-crop，默认与模型输入一致）")
+    p.add_argument("--size", type=int, default=config.EXTRACT_SIZE, help="抽帧/摄入输出正方形边长（center-crop，默认与模型输入一致）")
     p.add_argument("--min-frames", type=int, default=4, help="单视频最少帧数")
     p.add_argument("--max-frames", type=int, default=32, help="单视频最多帧数（超出则均匀抽取）")
     p.add_argument("--limit", type=int, default=0, help="仅处理前 N 个（测试用，0=全部）")

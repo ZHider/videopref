@@ -57,7 +57,7 @@ def extract_frames(
     max_frames: int = config.DEFAULT_MAX_FRAMES,
     black_threshold: int = config.BLACK_FRAME_MEAN,
     white_threshold: int = config.WHITE_FRAME_MEAN,
-    size: int = config.EXTRACT_MAX_WIDTH,
+    size: int = config.EXTRACT_SIZE,
     hwaccel: str | None = config.EXTRACT_HWACCEL,
 ) -> Path:
     """对单个视频拆帧并写入 ``out_dir``，返回 out_dir。
@@ -119,14 +119,14 @@ def extract_frames(
     return out_dir
 
 
-def ingest_image(image: Path, target: Path, size: int = config.IMAGE_MAX_WIDTH) -> Path:
+def ingest_image(image: Path, target: Path, size: int = config.IMAGE_SIZE) -> Path:
     """把图片摄入为 ``frames/image/`` 下的单文件条目，返回其路径。
 
     图片在模型层等价于 T=1 的视频：单文件条目即可让整条下游链路
     （清洗/标注/特征缓存/池化/训练/推理）原样工作（``MediaItem.frame_paths``
     对文件条目返回单元素列表）。
 
-    - 默认 ``size=config.IMAGE_MAX_WIDTH``（与模型输入一致 224）：center-crop 成
+    - 默认 ``size=config.IMAGE_SIZE``（与模型输入一致 224）：center-crop 成
       ``size×size`` 正方形（保持纵横比、中心裁切）并重编码为 JPEG，与视频帧/模型
       预处理语义一致（喂模型时 processor 的 resize 退化为恒等）。条目路径由
       ``FramesNamer`` 按同一规格分配为 ``image/{名}.jpg``，摄入输出与 manifest 严格一致。
@@ -210,8 +210,8 @@ def extract_from_input(
     max_frames: int = config.DEFAULT_MAX_FRAMES,
     black_threshold: int = config.BLACK_FRAME_MEAN,
     white_threshold: int = config.WHITE_FRAME_MEAN,
-    size: int = config.EXTRACT_MAX_WIDTH,
-    image_size: int = config.IMAGE_MAX_WIDTH,
+    size: int = config.EXTRACT_SIZE,
+    image_size: int = config.IMAGE_SIZE,
     hwaccel: str | None = config.EXTRACT_HWACCEL,
     workers: int = config.EXTRACT_WORKERS,
     recursive: bool = True,
@@ -221,7 +221,7 @@ def extract_from_input(
 
     - 单个视频文件 -> ffmpeg 拆帧到 frames/video/{sanitized_stem}/
     - 单个图片文件 -> 摄入为单文件条目 frames/image/{sanitized_stem}.jpg
-      （``ingest_image``，默认 center-crop 到 ``IMAGE_MAX_WIDTH``=224 存 JPEG）
+      （``ingest_image``，默认 center-crop 到 ``IMAGE_SIZE``=224 存 JPEG）
     - 文件夹 -> 对其下每个媒体文件分别输出到对应子区
       （``recursive=True`` 时递归所有子目录）
     - 路径列表（list[Path]）-> 逐项处理（视频拆帧 / 图片摄入）

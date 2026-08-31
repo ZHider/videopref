@@ -117,7 +117,7 @@ class FramesNamer:
     与图片缩放后的实际输出扩展名可能不同）。
     """
 
-    def __init__(self, frames_root: Path, image_size: int = config.IMAGE_MAX_WIDTH):
+    def __init__(self, frames_root: Path, image_size: int = config.IMAGE_SIZE):
         self.frames_root = Path(frames_root)
         self.image_size = image_size
         self.manifest = load_manifest(self.frames_root)
