@@ -384,6 +384,7 @@ uv run python app.py
 
 ## 变更记录
 
+- **v0.3.2**：**性能优化**——① CUDA 特征提取/推理用 **BF16 半精度**（`torch.autocast`，RTX 5070 Ti 实测约 **1.7x**、特征余弦相似度 0.99995，可 `amp=False` 回退）；② **图片摄入默认缩放到 640 存 JPEG**（`IMAGE_MAX_WIDTH` 与视频帧 `EXTRACT_MAX_WIDTH` 同一宽度标准，大幅节省磁盘/CPU；`FramesNamer` 同步分配 `.jpg` 条目，`0` 可回退原样复制）；③ README 新增「模块依赖与流水线」一节。
 - **v0.3.1**：摄入端按 `kind` 经分派表（`_make_ingest_handlers`）路由视频/图片，扩展点显式化；`run_training` 拆分为 `_resolve_device`/`_configure_cpu`/`_seed_all`/`_build_loaders`/`_train_epoch`/`_maybe_save_best` 等聚焦辅助函数（行为不变）。
 - **v0.3.0**：**MediaItem 统一条目契约**——新增 `items.py`（`MediaItem`：key/kind/path/frame_paths/scan），"条目=目录(视频)|文件(图片)"的隐式分支收敛为唯一显式实现；`frames_dir_to_paths`/`video_key_of`/`frames_dir_for_video`/`frames_key_for` 移除，`manifest.resolve_item`/`MediaItem.scan` 取代；`VideoPreferenceModel` → `PreferenceModel`（Checkpoint 结构不变）；labels.json 字段 `video_path` → `media_path`（读取兼容旧字段）；`parse_video_list` → `parse_media_list`；批量推理 CLI `--videos` 更名为 `--media`（旧名仍可用）；`app.py` 透传参数白名单自动 int 化（`--max-threads` 等）。
 - **v0.2.0**：更名为 `visual-pref` / `visualpref`；`app.py` 支持 argparse 透传任意 `--key value` 到 `demo.launch`。

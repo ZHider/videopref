@@ -7,4 +7,4 @@
 from . import config, paths
 
 __all__ = ["config", "paths"]
-__version__ = "0.3.1"
+__version__ = "0.3.2"
