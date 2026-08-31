@@ -75,6 +75,12 @@ def do_clear_frames(confirmed: bool) -> str:
 
 def build_extract_tab():
     with gr.Tab("🎬 拆帧"):
+        gr.Markdown(
+            "将媒体摄入为**模型输入规格**（224×224 正方形，center-crop 保持纵横比、不变形）：\n"
+            "- 视频按所选抽帧模式拆帧到 `frames/video/{名}/`（每帧 center-crop 到 224×224）\n"
+            "- 图片摄入为 `frames/image/{名}.jpg`（center-crop 到 224×224；`IMAGE_SIZE=0` 可回退原样复制）\n"
+            "- 输出已是模型输入尺寸，喂模型时跳过 resize（省 CPU）；标注图相应变小、居中裁切"
+        )
         with gr.Row():
             video_file = gr.File(
                 label="媒体文件（上传单个视频或图片）",

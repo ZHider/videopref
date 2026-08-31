@@ -116,7 +116,8 @@ def build_batch_tab():
     with gr.Tab("⚡ 批量推理"):
         gr.Markdown(
             "对成百上千个媒体（视频/图片）批量推理：缺帧视频自动拆帧（默认 `keyframe` 快速模式），"
-            "图片直接摄入为单文件；骨干与 Checkpoint 只加载一次，坏文件自动跳过。结果以表格展示并可导出 CSV。"
+            "图片直接摄入为单文件；缺帧/未摄入的媒体统一 center-crop 到 224×224（模型输入规格）。"
+            "骨干与 Checkpoint 只加载一次，坏文件自动跳过。结果以表格展示并可导出 CSV。"
         )
         batch_list_text = gr.Textbox(
             label="媒体路径列表（每行一个视频或图片文件/文件夹路径）",
