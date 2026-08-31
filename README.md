@@ -13,6 +13,7 @@
 - **CLI 保留**：`train.py`、`infer_batch.py`、`random_pick_videos.py`、`move_low_score_files.py` 命令行能力完整，可脚本化/批处理。
 - **三种抽帧模式**：`uniform`（时长自适应均匀，默认）、`keyframe`（只解 I 帧，快 ~10 倍）、`scene`（场景检测）；图片摄入不走 ffmpeg。
 - **特征缓存 + 帧签名失效校验**：清洗/重摄入后自动重提取，训练与推理严格一致、不重复计算。
+- **BF16 推理加速**：CUDA 下特征提取/推理用 `torch.autocast(bfloat16)`（RTX 5070 Ti 实测约 **1.7x**、特征余弦相似度 0.99995），可 `amp=False` 回退 FP32。
 - **坏文件容错**：单个视频/图片失败跳过不中断批次。
 
 ## 工作流
