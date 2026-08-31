@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -57,10 +58,16 @@ class Predictor:
         self.model.load_state_dict(self.payload["model_state"])
         self.model.eval()
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def predict_feats(self, feats: torch.Tensor) -> float:
         """对逐帧特征 ``[N, D]`` 做池化 + 分类，返回喜好概率标量（调用方保证 N>0）。"""
-        prob = self.model(feats.to(self.device).unsqueeze(0), mask=None)
+        cast_ctx = (
+            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            if self.device.type == "cuda"
+            else nullcontext()
+        )
+        with cast_ctx:
+            prob = self.model(feats.to(self.device).unsqueeze(0), mask=None)
         return float(prob.squeeze().cpu())
 
     def predict_frame_paths(

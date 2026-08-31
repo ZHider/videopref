@@ -13,6 +13,7 @@ CPU 预处理（解码/缩放/归一化）与 GPU 前向的重叠由 ``pipeline.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -23,7 +24,7 @@ from .pipeline import prefetch_map
 __all__ = ["extract_frame_features"]
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def extract_frame_features(
     model: nn.Module,
     processor,
@@ -32,6 +33,7 @@ def extract_frame_features(
     batch_size: int = 8,
     transform=None,
     prefetch: int = 2,
+    amp: bool = True,
 ) -> torch.Tensor:
     """用冻结骨干批量提取每帧 ``[CLS]`` 特征。
 
@@ -42,6 +44,9 @@ def extract_frame_features(
         否则使用 ``processor`` 做预处理。
     prefetch : 流水线预取深度。CPU 预处理（解码/缩放/归一化）在后台线程进行，
         与 GPU 前向重叠，避免 GPU 空等 CPU（≥2 才有预取效果）。
+    amp : GPU 上前向是否用 BF16 半精度（``torch.autocast``）。RTX 5070 Ti 等
+        Blackwell/Ampere 系列可显著提速（冻结骨干约翻倍）且精度几乎无损；
+        CPU 或关闭时回退 FP32。
 
     Returns
     -------
@@ -62,9 +67,14 @@ def extract_frame_features(
         inputs = processor(images=[str(p) for p in chunk], return_tensors="pt")
         return inputs["pixel_values"]
 
+    use_amp = amp and torch.device(device).type == "cuda"
+    cast_ctx = (
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
+    )
     feats = []
-    for chunk in prefetch_map(_preprocess_cpu, chunks, depth=prefetch):
-        out = model(chunk.to(device))
-        # pooler_output = sequence_output[:, 0, :] 即 [CLS] 特征
-        feats.append(out.pooler_output.float().cpu())
+    with cast_ctx:
+        for chunk in prefetch_map(_preprocess_cpu, chunks, depth=prefetch):
+            out = model(chunk.to(device))
+            # pooler_output = sequence_output[:, 0, :] 即 [CLS] 特征
+            feats.append(out.pooler_output.float().cpu())
     return torch.cat(feats, dim=0)
