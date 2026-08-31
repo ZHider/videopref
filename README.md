@@ -9,7 +9,7 @@
 ## 特性
 
 - **全流程 GUI 化**：Gradio 六 Tab——拆帧/摄入、标注、推理、批量推理、工具、训练；训练与批量推理在后台线程运行 + 实时曲线/HTML 进度条，不阻塞界面。
-- **图片为一等公民**：图片以 `frames/image/` 下**单文件**独立存放（保留原扩展名、零重编码），与视频分区，元数据带 `kind` 类型。
+- **图片为一等公民**：图片以 `frames/image/` 下**单文件**独立存放（摄入时缩放到 640 宽存 JPEG，与视频帧同一宽度标准；可 `IMAGE_MAX_WIDTH=0` 回退原样复制），与视频分区，元数据带 `kind` 类型。
 - **CLI 保留**：`train.py`、`infer_batch.py`、`random_pick_videos.py`、`move_low_score_files.py` 命令行能力完整，可脚本化/批处理。
 - **三种抽帧模式**：`uniform`（时长自适应均匀，默认）、`keyframe`（只解 I 帧，快 ~10 倍）、`scene`（场景检测）；图片摄入不走 ffmpeg。
 - **特征缓存 + 帧签名失效校验**：清洗/重摄入后自动重提取，训练与推理严格一致、不重复计算。
@@ -24,7 +24,7 @@
 
 ```
 媒体(视频文件/图片文件/文件夹/路径列表) ─▶ 🎬 拆帧 Tab ─┬─ 视频 ─▶ frames/video/{名}/0001.jpg ...
-                                                          └─ 图片 ─▶ frames/image/{名}.{扩展名}  (单文件, 原样保留)
+                                                          └─ 图片 ─▶ frames/image/{名}.jpg  (单文件, 缩放到 640)
                                         │ 人工清洗：删除低质帧 / 替换图片 (可选)
                                         ▼
                          🏷️ 标注 Tab：逐项看图点 喜欢/不喜欢 (视频多帧 🎬 / 图片单帧 🖼)
@@ -44,7 +44,7 @@ frames/
   video/                    # 视频工作区：一个视频一个目录
     <sanitized名>/0001.jpg...      (同名加路径短哈希去重)
   image/                    # 图片工作区：一个图片一个文件
-    <sanitized名>.<原扩展名>        (字节级原样保留)
+    <sanitized名>.jpg          (摄入时缩放到 640，与视频帧一致)
 ```
 
 **`frames/_manifest.json`**（结构化元数据，提升信息密度）：
@@ -175,7 +175,7 @@ visualpref/
   → _make_ingest_handlers       (按 kind 分派)
       ├─ video → extract_frames → ffmpeg 拆帧
       │          (uniform/keyframe/scene + 纯黑白过滤 + 零填充编号)
-      └─ image → ingest_image   → 字节级复制(保原图/扩展名)
+      └─ image → ingest_image   → 缩放到 640 存 JPEG(与视频帧同宽)
   → frames/video/{key}/*.jpg  │  frames/image/{key}.{ext}
   → _manifest.json  (media_path → {dir, kind, ext})
         │
@@ -270,7 +270,7 @@ uv run python app.py --inbrowser                         # 启动后自动打开
 
 ### 阶段一：摄入 + 清洗 + 标注
 
-1. **拆帧/摄入**（「🎬 拆帧」Tab）：提供媒体文件、文件夹或每行一个的路径列表。视频按所选抽帧模式拆帧到 `frames/video/{名}/`；**图片原样摄入**为 `frames/image/{名}.{原扩展名}`（默认不缩放、零重编码）。
+1. **拆帧/摄入**（「🎬 拆帧」Tab）：提供媒体文件、文件夹或每行一个的路径列表。视频按所选抽帧模式拆帧到 `frames/video/{名}/`；**图片摄入**为 `frames/image/{名}.jpg`（默认缩放到 640 宽，与视频帧一致，供模型与人工看图；`IMAGE_MAX_WIDTH=0` 可回退原样复制）。
 2. **人工清洗（可选）**：打开 `frames/video/{名}/` 删除低质帧；图片可替换 `frames/image/{名}.{扩展名}`。特征缓存带**帧签名校验**，清洗后自动重提取。
 3. **标注**（「🏷️ 标注」Tab）：点「标注 frames/ 全部已摄入媒体」或「继续上次标注」（进度存 `data/label_progress.json`）。逐项看图点 👍/👎/跳过/上一步；预览「每行预览数/高度」可调。完毕点「导出 labels.json」（label: 1=喜欢, 0=不喜欢，含 `kind`）。
 
@@ -280,7 +280,7 @@ uv run python app.py --inbrowser                         # 启动后自动打开
 uv run python -c "from pathlib import Path; from visualpref.frames import extract_from_input; from visualpref import config; items = extract_from_input(Path('path/to/inputs'), Path(config.FRAMES_ROOT)); print([str(i.path) for i in items])"
 ```
 
-**同名自动去重**：不同目录下同名视频 → `video/foo` 与 `video/foo_<hash>`；同名图片 → `image/foo.png` 与 `image/foo_<hash>.png`。映射写入 `_manifest.json`，训练/推理据此定位；同一媒体重复摄入幂等复用原条目。
+**同名自动去重**：不同目录下同名视频 → `video/foo` 与 `video/foo_<hash>`；同名图片 → `image/foo.jpg` 与 `image/foo_<hash>.jpg`。映射写入 `_manifest.json`，训练/推理据此定位；同一媒体重复摄入幂等复用原条目。
 
 ### 阶段二：训练
 
@@ -339,7 +339,7 @@ uv run python move_low_score_files.py <csv> [-d 目标文件夹] [-t 阈值] [--
 | `keyframe`（推荐批量） | `-skip_frame nokey` 只解 I 帧 | **快 ~10 倍、CPU 骤降** |
 | `scene` | ffmpeg 场景检测（`gt(scene,阈值)`） | 中等 |
 
-其他：视频输出宽度上限默认 640、自动剔除纯黑(<10)/纯白(>245)帧、并行处理 `--workers`、均匀封顶到 `max_frames`、递归扫描子目录、ffmpeg `-vsync`/`-fps_mode` 自动适配。**图片摄入不走 ffmpeg**：默认原样复制、保留原始分辨率与扩展名（`IMAGE_MAX_WIDTH=0`），宽度上限仅对视频生效，保证图片零质量损失。
+其他：视频输出宽度上限默认 640、自动剔除纯黑(<10)/纯白(>245)帧、并行处理 `--workers`、均匀封顶到 `max_frames`、递归扫描子目录、ffmpeg `-vsync`/`-fps_mode` 自动适配。**图片摄入不走 ffmpeg**：默认缩放到 640 宽存 JPEG（`IMAGE_MAX_WIDTH` 与视频帧 `EXTRACT_MAX_WIDTH` 同一宽度标准，节省磁盘/CPU；模型只需 224 缩放无损），设为 0 可回退原样复制。
 
 ## Checkpoint 规范
 

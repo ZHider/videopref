@@ -125,11 +125,12 @@ def ingest_image(image: Path, target: Path, max_width: int = config.IMAGE_MAX_WI
     （清洗/标注/特征缓存/池化/训练/推理）原样工作（``MediaItem.frame_paths``
     对文件条目返回单元素列表）。
 
-    - 默认 ``max_width=0``：**原样复制**，保留原始分辨率、像素与扩展名
-      （零质量损失）。图片不再套用视频的 ``0001.jpg`` 命名，而是以
-      ``image/{名}.{原扩展名}`` 单独存放，作为一等公民。
-    - ``max_width>0`` 时缩放到宽度上限再存为 JPEG（仅在显式要求时，图片
-      默认不缩放以保质量）。
+    - 默认 ``max_width=config.IMAGE_MAX_WIDTH``（640，与视频帧一致）：缩放到宽度
+      上限并重编码为 JPEG，避免字节级保留超大原图（显著节省磁盘/CPU；模型只需
+      224，640 足以人工看图）。条目路径由 ``FramesNamer`` 按同一宽度配置分配为
+      ``image/{名}.jpg``，摄入输出与 manifest 严格一致。
+    - ``max_width=0`` 时**原样复制**：保留原始分辨率、像素与扩展名（零质量损失，
+      仅显式要求时使用）。
     """
     image = Path(image)
     if not image.is_file():
@@ -186,7 +187,7 @@ def _make_ingest_handlers(
         )
 
     def _image(media: Path, item: MediaItem) -> None:
-        # 图片：摄入为单文件条目（默认保留原始分辨率/质量）
+        # 图片：摄入为单文件条目（默认缩放到 IMAGE_MAX_WIDTH 存 JPEG；0=字节复制）
         ingest_image(media, item.path, max_width=image_max_width)
 
     return {"video": _video, "image": _image}
@@ -212,8 +213,8 @@ def extract_from_input(
     """对媒体文件（视频或图片）、媒体文件夹或媒体路径列表进行处理。
 
     - 单个视频文件 -> ffmpeg 拆帧到 frames/video/{sanitized_stem}/
-    - 单个图片文件 -> 摄入为单文件条目 frames/image/{sanitized_stem}{ext}
-      （``ingest_image``，默认原样保留）
+    - 单个图片文件 -> 摄入为单文件条目 frames/image/{sanitized_stem}.jpg
+      （``ingest_image``，默认缩放到 ``IMAGE_MAX_WIDTH``=640 存 JPEG）
     - 文件夹 -> 对其下每个媒体文件分别输出到对应子区
       （``recursive=True`` 时递归所有子目录）
     - 路径列表（list[Path]）-> 逐项处理（视频拆帧 / 图片摄入）
@@ -241,7 +242,8 @@ def extract_from_input(
 
     # 同名媒体去重：分配 + 解析统一由 FramesNamer 处理。
     # 先单线程分配好所有条目（避免并行时同名文件竞态），再并行处理。
-    namer = FramesNamer(frames_root)
+    # image_max_width 同时决定图片条目输出扩展名（缩放 → .jpg，见 FramesNamer）。
+    namer = FramesNamer(frames_root, image_max_width=image_max_width)
     jobs = [(v, namer.assign(v)) for v in sources]
     total = len(jobs)
     done = [0]

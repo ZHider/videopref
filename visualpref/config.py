@@ -74,15 +74,16 @@ IMAGE_EXTENSIONS: frozenset[str] = frozenset(
 # 媒体（视频 + 图片）扩展名合集，供扫描/分流使用
 MEDIA_EXTENSIONS: frozenset[str] = VIDEO_EXTENSIONS | IMAGE_EXTENSIONS
 
-# 图片摄入宽度上限：0=保留原始分辨率/像素（不缩放），保证图片无质量损失。
-# 仅在显式给出正数时才会缩放到宽度上限（DINOv3 只需 224，缩放对模型无损，
-# 但人工看图/清洗阶段保留原图更稳妥）。
-IMAGE_MAX_WIDTH: int = 0
-
-# 抽帧性能优化
-EXTRACT_MAX_WIDTH: int = 640       # 抽帧输出宽度上限（DINOv3 仅需 224，640 对分类无损，显著降 CPU/磁盘）
+# 抽帧/摄入输出宽度上限（DINOv3 仅需 224，640 对分类无损，显著降 CPU/磁盘，
+# 同时兼顾人工清洗/标注看图）。视频帧与图片摄入共用同一宽度标准。
+EXTRACT_MAX_WIDTH: int = 640
 EXTRACT_WORKERS: int = 4           # 批量抽帧并行视频数（利用多核，缩短整批耗时）
 EXTRACT_HWACCEL: str | None = None # 硬件解码："cuda" 等；长/高分辨率视频可降 CPU，小视频不划算
+
+# 图片摄入宽度上限：默认与视频帧一致（EXTRACT_MAX_WIDTH）——摄入时缩放到宽度上限
+# 并重编码为 JPEG，不再字节级保留原图（显著节省磁盘/CPU；模型只需 224，缩放无损，
+# 640 也足以人工看图）。设为 0 可回退"原样复制"（保留原始分辨率/像素与扩展名）。
+IMAGE_MAX_WIDTH: int = EXTRACT_MAX_WIDTH
 
 # ---------------------------------------------------------------------------
 # 标签契约
