@@ -57,7 +57,7 @@ def extract_frames(
     max_frames: int = config.DEFAULT_MAX_FRAMES,
     black_threshold: int = config.BLACK_FRAME_MEAN,
     white_threshold: int = config.WHITE_FRAME_MEAN,
-    max_width: int = config.EXTRACT_MAX_WIDTH,
+    size: int = config.EXTRACT_MAX_WIDTH,
     hwaccel: str | None = config.EXTRACT_HWACCEL,
 ) -> Path:
     """对单个视频拆帧并写入 ``out_dir``，返回 out_dir。
@@ -65,7 +65,8 @@ def extract_frames(
     流程：按抽样策略取帧 -> 剔除纯黑/纯白 -> 零填充重新编号。
     过滤后不足 ``min_frames`` 时回退保留原始抽取结果，避免空目录。
 
-    - ``max_width``：输出宽度上限（0=不缩放），默认 640，降低 CPU/磁盘。
+    - ``size``：输出正方形边长（center-crop 成 size×size），默认与模型输入
+      一致（224），喂模型时 processor 的 resize 退化为恒等（0=不缩放）。
     - ``hwaccel``：可选硬件解码（如 ``"cuda"``），长/高分辨率视频可降 CPU。
     """
     video = Path(video)
@@ -84,23 +85,23 @@ def extract_frames(
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         if sampling == "scene":
-            count = scene_extract(video, tmp_dir, scene_threshold, max_width=max_width, hwaccel=hwaccel)
+            count = scene_extract(video, tmp_dir, scene_threshold, size=size, hwaccel=hwaccel)
             if count < 1:
                 budget = adaptive_frame_budget(
                     video, fps_target, min_frames, max_frames, duration=duration
                 )
-                uniform_sample(video, tmp_dir, budget, max_width=max_width, hwaccel=hwaccel, duration=duration)
+                uniform_sample(video, tmp_dir, budget, size=size, hwaccel=hwaccel, duration=duration)
         elif sampling == "keyframe":
-            count = keyframe_sample(video, tmp_dir, max_width=max_width, hwaccel=hwaccel)
+            count = keyframe_sample(video, tmp_dir, size=size, hwaccel=hwaccel)
             if count < min_frames:
                 # 关键帧过少则回退均匀采样，保证帧数足够
                 budget = adaptive_frame_budget(
                     video, fps_target, min_frames, max_frames, duration=duration
                 )
-                uniform_sample(video, tmp_dir, budget, max_width=max_width, hwaccel=hwaccel, duration=duration)
+                uniform_sample(video, tmp_dir, budget, size=size, hwaccel=hwaccel, duration=duration)
         else:  # uniform（默认）
             budget = adaptive_frame_budget(video, fps_target, min_frames, max_frames, duration=duration)
-            uniform_sample(video, tmp_dir, budget, max_width=max_width, hwaccel=hwaccel, duration=duration)
+            uniform_sample(video, tmp_dir, budget, size=size, hwaccel=hwaccel, duration=duration)
 
         raw_frames = sorted(tmp_dir.glob("cap_*.jpg"))
         kept = [p for p in raw_frames if not is_black_or_white(p, black_threshold, white_threshold)]
@@ -118,18 +119,18 @@ def extract_frames(
     return out_dir
 
 
-def ingest_image(image: Path, target: Path, max_width: int = config.IMAGE_MAX_WIDTH) -> Path:
+def ingest_image(image: Path, target: Path, size: int = config.IMAGE_MAX_WIDTH) -> Path:
     """把图片摄入为 ``frames/image/`` 下的单文件条目，返回其路径。
 
     图片在模型层等价于 T=1 的视频：单文件条目即可让整条下游链路
     （清洗/标注/特征缓存/池化/训练/推理）原样工作（``MediaItem.frame_paths``
     对文件条目返回单元素列表）。
 
-    - 默认 ``max_width=config.IMAGE_MAX_WIDTH``（640，与视频帧一致）：缩放到宽度
-      上限并重编码为 JPEG，避免字节级保留超大原图（显著节省磁盘/CPU；模型只需
-      224，640 足以人工看图）。条目路径由 ``FramesNamer`` 按同一宽度配置分配为
-      ``image/{名}.jpg``，摄入输出与 manifest 严格一致。
-    - ``max_width=0`` 时**原样复制**：保留原始分辨率、像素与扩展名（零质量损失，
+    - 默认 ``size=config.IMAGE_MAX_WIDTH``（与模型输入一致 224）：center-crop 成
+      ``size×size`` 正方形（保持纵横比、中心裁切）并重编码为 JPEG，与视频帧/模型
+      预处理语义一致（喂模型时 processor 的 resize 退化为恒等）。条目路径由
+      ``FramesNamer`` 按同一规格分配为 ``image/{名}.jpg``，摄入输出与 manifest 严格一致。
+    - ``size=0`` 时**原样复制**：保留原始分辨率、像素与扩展名（零质量损失，
       仅显式要求时使用）。
     """
     image = Path(image)
@@ -137,13 +138,18 @@ def ingest_image(image: Path, target: Path, max_width: int = config.IMAGE_MAX_WI
         raise FileNotFoundError(f"图片不存在: {image}")
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    if max_width and max_width > 0:
+    if size and size > 0:
         dst = target.with_suffix(".jpg")
         with Image.open(image) as im:
             im = im.convert("RGB")
-            if im.width > max_width:
-                h = max(1, round(im.height * max_width / im.width))
-                im = im.resize((max_width, h), Image.LANCZOS)
+            # center-crop 到正方形（短边），再缩放到 size×size —— 与官方
+            # Resize+CenterCrop 语义一致（保持纵横比、中心裁切，不变形）
+            w, h = im.size
+            side = min(w, h)
+            left, top = (w - side) // 2, (h - side) // 2
+            im = im.crop((left, top, left + side, top + side))
+            if side != size:
+                im = im.resize((size, size), Image.LANCZOS)
             im.save(dst, "JPEG", quality=95)
         return dst
     # 原样复制（字节级一致），保留原扩展名，零重编码质量损失
@@ -160,15 +166,16 @@ def _make_ingest_handlers(
     max_frames: int,
     black_threshold: int,
     white_threshold: int,
-    max_width: int,
-    image_max_width: int,
+    size: int,
+    image_size: int,
     hwaccel: str | None,
 ) -> dict[str, Callable[[Path, MediaItem], None]]:
     """构造 "媒体类型 -> 摄入处理器" 的分派表。
 
     处理器签名 ``(media: Path, item: MediaItem) -> None``：把媒体写入其条目
-    （视频=ffmpeg 拆帧到工作区目录，图片=字节级复制为单文件）。后续新增媒体
-    类型只需在此注册一个新 kind 的处理器，``extract_from_input`` 主循环不变。
+    （视频=ffmpeg 拆帧 center-crop 到工作区目录，图片=center-crop 为单文件）。
+    后续新增媒体类型只需在此注册一个新 kind 的处理器，``extract_from_input``
+    主循环不变。
     """
 
     def _video(media: Path, item: MediaItem) -> None:
@@ -182,13 +189,13 @@ def _make_ingest_handlers(
             max_frames=max_frames,
             black_threshold=black_threshold,
             white_threshold=white_threshold,
-            max_width=max_width,
+            size=size,
             hwaccel=hwaccel,
         )
 
     def _image(media: Path, item: MediaItem) -> None:
-        # 图片：摄入为单文件条目（默认缩放到 IMAGE_MAX_WIDTH 存 JPEG；0=字节复制）
-        ingest_image(media, item.path, max_width=image_max_width)
+        # 图片：center-crop 为单文件条目（默认 MODEL_INPUT_SIZE=224 存 JPEG；0=字节复制）
+        ingest_image(media, item.path, size=image_size)
 
     return {"video": _video, "image": _image}
 
@@ -203,8 +210,8 @@ def extract_from_input(
     max_frames: int = config.DEFAULT_MAX_FRAMES,
     black_threshold: int = config.BLACK_FRAME_MEAN,
     white_threshold: int = config.WHITE_FRAME_MEAN,
-    max_width: int = config.EXTRACT_MAX_WIDTH,
-    image_max_width: int = config.IMAGE_MAX_WIDTH,
+    size: int = config.EXTRACT_MAX_WIDTH,
+    image_size: int = config.IMAGE_MAX_WIDTH,
     hwaccel: str | None = config.EXTRACT_HWACCEL,
     workers: int = config.EXTRACT_WORKERS,
     recursive: bool = True,
@@ -214,7 +221,7 @@ def extract_from_input(
 
     - 单个视频文件 -> ffmpeg 拆帧到 frames/video/{sanitized_stem}/
     - 单个图片文件 -> 摄入为单文件条目 frames/image/{sanitized_stem}.jpg
-      （``ingest_image``，默认缩放到 ``IMAGE_MAX_WIDTH``=640 存 JPEG）
+      （``ingest_image``，默认 center-crop 到 ``IMAGE_MAX_WIDTH``=224 存 JPEG）
     - 文件夹 -> 对其下每个媒体文件分别输出到对应子区
       （``recursive=True`` 时递归所有子目录）
     - 路径列表（list[Path]）-> 逐项处理（视频拆帧 / 图片摄入）
@@ -242,8 +249,8 @@ def extract_from_input(
 
     # 同名媒体去重：分配 + 解析统一由 FramesNamer 处理。
     # 先单线程分配好所有条目（避免并行时同名文件竞态），再并行处理。
-    # image_max_width 同时决定图片条目输出扩展名（缩放 → .jpg，见 FramesNamer）。
-    namer = FramesNamer(frames_root, image_max_width=image_max_width)
+    # image_size 同时决定图片条目输出扩展名（缩放 → .jpg，见 FramesNamer）。
+    namer = FramesNamer(frames_root, image_size=image_size)
     jobs = [(v, namer.assign(v)) for v in sources]
     total = len(jobs)
     done = [0]
@@ -256,8 +263,8 @@ def extract_from_input(
         max_frames=max_frames,
         black_threshold=black_threshold,
         white_threshold=white_threshold,
-        max_width=max_width,
-        image_max_width=image_max_width,
+        size=size,
+        image_size=image_size,
         hwaccel=hwaccel,
     )
 

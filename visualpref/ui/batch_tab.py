@@ -44,7 +44,7 @@ def _on_batch_prog(pair, desc=None, **kwargs) -> None:
 
 
 def _batch_worker(paths, checkpoint_path, sampling, batch_size, workers, threads,
-                  max_width, min_frames, max_frames, export_csv) -> None:
+                  size, min_frames, max_frames, export_csv) -> None:
     """后台线程执行批量推理，把进度/结果写入全局 _batch。"""
     try:
         results = run_batch_inference(
@@ -54,7 +54,7 @@ def _batch_worker(paths, checkpoint_path, sampling, batch_size, workers, threads
             batch_size=int(batch_size),
             workers=int(workers),
             threads=int(threads),
-            max_width=int(max_width),
+            size=int(size),
             min_frames=int(min_frames),
             max_frames=int(max_frames),
             progress=_on_batch_prog,
@@ -76,7 +76,7 @@ def _batch_worker(paths, checkpoint_path, sampling, batch_size, workers, threads
 
 def do_batch_infer_start(video_list_text, sampling, fps_target, min_frames, max_frames,
                          scene_threshold, black_thresh, white_thresh, checkpoint_path,
-                         backbone_dir, batch_size, workers, threads, max_width, export_csv):
+                         backbone_dir, batch_size, workers, threads, size, export_csv):
     """启动后台批量推理（不阻塞 UI，进度经 Timer 轮询更新）。"""
     paths = parse_media_list(video_list_text)
     if not paths:
@@ -89,7 +89,7 @@ def do_batch_infer_start(video_list_text, sampling, fps_target, min_frames, max_
     threading.Thread(
         target=_batch_worker,
         args=(paths, checkpoint_path, sampling, batch_size, workers, threads,
-              max_width, min_frames, max_frames, export_csv),
+              size, min_frames, max_frames, export_csv),
         daemon=True,
     ).start()
     return f"已启动批量推理：{len(paths)} 个媒体。请稍候…"
@@ -131,7 +131,7 @@ def build_batch_tab():
             batch_batchsize = gr.Slider(1, 64, value=16, step=1, label="特征提取 batch（调大提升 GPU 利用率）")
             batch_workers = gr.Slider(1, 16, value=float(config.EXTRACT_WORKERS), step=1, label="并行拆帧视频数")
             batch_threads = gr.Slider(1, 16, value=8, step=1, label="torch CPU 线程数上限")
-            batch_maxwidth = gr.Slider(0, 1280, value=float(config.EXTRACT_MAX_WIDTH), step=16, label="拆帧宽度上限（0=不缩放；图片始终原样保留）")
+            batch_size_ctl = gr.Slider(64, 512, value=float(config.EXTRACT_MAX_WIDTH), step=32, label="抽帧/摄入输出正方形边长（center-crop；默认与模型输入一致）")
         batch_export = gr.Checkbox(value=True, label="同时导出 CSV 到 data/predictions.csv")
         btn_batch = gr.Button("开始批量推理", variant="primary")
         batch_progress = gr.HTML()  # Tab 内可见的进度条（Timer 轮询更新）
@@ -148,7 +148,7 @@ def build_batch_tab():
             inputs=[
                 batch_list_text, batch_sampling, batch_fps, batch_min, batch_max,
                 batch_scene, batch_black, batch_white, batch_ckpt, batch_backbone,
-                batch_batchsize, batch_workers, batch_threads, batch_maxwidth, batch_export,
+                batch_batchsize, batch_workers, batch_threads, batch_size_ctl, batch_export,
             ],
             outputs=[batch_summary],
         )

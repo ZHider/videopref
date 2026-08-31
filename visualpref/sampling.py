@@ -54,12 +54,12 @@ def scene_extract(
     video: Path | str,
     out_dir: Path,
     scene_threshold: float,
-    max_width: int = 0,
+    size: int = 0,
     hwaccel: str | None = None,
 ) -> int:
     """ffmpeg 场景变化检测采样到 out_dir（cap_*.jpg）。返回写出的帧数。"""
     vf = ["select='gt(scene,{})'".format(scene_threshold)]
-    s = scale_filter(max_width)
+    s = scale_filter(size)
     if s:
         vf.append(s)
     cmd = build_ffmpeg_cmd(
@@ -78,7 +78,7 @@ def scene_extract(
 def keyframe_sample(
     video: Path | str,
     out_dir: Path,
-    max_width: int = 0,
+    size: int = 0,
     hwaccel: str | None = None,
 ) -> int:
     """关键帧抽帧：``-skip_frame nokey`` 只解码 I 帧，跳过 P/B 帧。
@@ -87,7 +87,7 @@ def keyframe_sample(
     帧间隔依赖编码器 GOP，不完全均匀，属"粗糙但快"模式。
     """
     vf = []
-    s = scale_filter(max_width)
+    s = scale_filter(size)
     if s:
         vf.append(s)
     cmd = build_ffmpeg_cmd(
@@ -104,7 +104,7 @@ def uniform_sample(
     video: Path | str,
     out_dir: Path,
     n_frames: int,
-    max_width: int = 0,
+    size: int = 0,
     hwaccel: str | None = None,
     duration: float | None = None,
 ) -> int:
@@ -117,7 +117,7 @@ def uniform_sample(
         # 时长未知（如无法 ffprobe）：按名义 30s 估算，结果仍受后续上限约束
         fps = max(0.05, n_frames / 30.0)
     vf = [f"fps={fps:.6f}"]
-    s = scale_filter(max_width)
+    s = scale_filter(size)
     if s:
         vf.append(s)
     cmd = build_ffmpeg_cmd(

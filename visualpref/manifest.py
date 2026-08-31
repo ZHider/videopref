@@ -108,8 +108,8 @@ class FramesNamer:
     """批量分配唯一媒体条目子路径；同名媒体自动追加路径短哈希（如 ``a_1a2b3c4``）。
 
     - 视频条目 -> ``video/{sanitized_stem}``（目录）
-    - 图片条目 -> ``image/{sanitized_stem}{out_ext}``（单文件）：``image_max_width>0``
-      时输出 ``.jpg``（摄入端缩放重编码为 JPEG），否则保留源扩展名（字节复制）。
+    - 图片条目 -> ``image/{sanitized_stem}{out_ext}``（单文件）：``image_size>0``
+      时输出 ``.jpg``（摄入端 center-crop 重编码为 JPEG），否则保留源扩展名（字节复制）。
 
     分配与解析（``resolve_item``）同处本模块，保证"媒体 -> 条目"契约唯一实现。
     幂等：同一媒体重复摄入复用既有条目路径。manifest 值为结构化 dict
@@ -117,9 +117,9 @@ class FramesNamer:
     与图片缩放后的实际输出扩展名可能不同）。
     """
 
-    def __init__(self, frames_root: Path, image_max_width: int = config.IMAGE_MAX_WIDTH):
+    def __init__(self, frames_root: Path, image_size: int = config.IMAGE_MAX_WIDTH):
         self.frames_root = Path(frames_root)
-        self.image_max_width = image_max_width
+        self.image_size = image_size
         self.manifest = load_manifest(self.frames_root)
         # 仅把 manifest 中已登记的条目子路径视为"已被其他媒体占用"；
         # 磁盘上未登记的旧产物视为同媒体既往结果，可复用（幂等）。
@@ -137,9 +137,9 @@ class FramesNamer:
         stem = sanitize_name(p.stem)
         src_ext = p.suffix.lower()
         if is_image(p):
-            # 输出扩展名：缩放重编码为 JPEG；否则保留源扩展名（字节复制）。
+            # 输出扩展名：center-crop 重编码为 JPEG；否则保留源扩展名（字节复制）。
             # 与摄入端 ingest_image 的输出保持一致（见 frames.py）。
-            out_ext = ".jpg" if self.image_max_width and self.image_max_width > 0 else src_ext
+            out_ext = ".jpg" if self.image_size and self.image_size > 0 else src_ext
             sub, base = config.FRAMES_IMAGE_SUBDIR, f"{stem}{out_ext}"
         else:
             out_ext = ""

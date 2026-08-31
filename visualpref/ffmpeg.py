@@ -73,10 +73,20 @@ def run_ffmpeg(cmd: list[str], timeout: int = 3600) -> subprocess.CompletedProce
     return subprocess.run(cmd, capture_output=True, timeout=timeout, **_SUBPROCESS_TEXT)
 
 
-def scale_filter(max_width: int) -> str:
-    """输出分辨率上限滤镜；0=不缩放。对分类无损，显著降低 JPEG 编码 CPU 与磁盘。"""
-    if max_width and max_width > 0:
-        return f"scale='min({max_width},iw)':-2"
+def scale_filter(size: int) -> str:
+    """生成"center-crop 成 size×size 正方形"滤镜（先裁正方形再缩放到 size）。
+
+    与 ``DINOv3ViTImageProcessor`` 的 resize 语义对齐：保持纵横比、中心裁切成
+    正方形再缩放到 ``size``，喂模型时 processor 的 resize 退化为恒等（跳过昂贵
+    缩放）。0=不缩放。
+
+    注意：filter 链内 ``min(iw,ih)`` 的逗号必须转义为 ``\\,``，否则会被当成
+    filter 分隔符。
+    """
+    if size and size > 0:
+        s = str(size)
+        crop = "crop=min(iw\\,ih):min(iw\\,ih):(iw-min(iw\\,ih))/2:(ih-min(iw\\,ih))/2"
+        return f"{crop},scale={s}:{s}"
     return ""
 
 

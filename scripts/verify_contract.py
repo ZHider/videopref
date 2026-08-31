@@ -104,8 +104,8 @@ def _run_checks(root: Path) -> None:
     it = resolve_item(media_img, frames_root)
     check("回退图片条目", it.key == "image/pic.png" and it.kind == "image")
 
-    # image_max_width=0：字节复制语义（保留源扩展名）
-    namer = FramesNamer(frames_root, image_max_width=0)
+    # image_size=0：字节复制语义（保留源扩展名）
+    namer = FramesNamer(frames_root, image_size=0)
     it1 = namer.assign(media_v)
     it2 = namer.assign(media_img)
     check("分配视频条目", it1.key == "video/my_video" and it1.kind == "video")
@@ -129,23 +129,23 @@ def _run_checks(root: Path) -> None:
     check("manifest 命中", it.key == "video/my_video" and it.path == frames_root / "video/my_video")
     check("item_key_for", item_key_for(media_v2, frames_root) == it3.key)
 
-    print("== 图片缩放摄入（image_max_width=640） ==")
+    print("== 图片 center-crop 摄入（image_size=224） ==")
     from PIL import Image as _PILImage
 
     media_img2 = root / "src3" / "photo.PNG"
     media_img2.parent.mkdir(parents=True)
     _PILImage.new("RGB", (1200, 800), (200, 100, 50)).save(str(media_img2), "PNG")
-    namer_z = FramesNamer(frames_root, image_max_width=640)
+    namer_z = FramesNamer(frames_root, image_size=224)
     it_z = namer_z.assign(media_img2)
-    check("缩放分配 .jpg", it_z.key == "image/photo.jpg" and it_z.kind == "image")
-    out = ingest_image(media_img2, it_z.path, max_width=640)
-    check("缩放输出与条目一致", out == it_z.path and it_z.path.is_file())
-    check("缩放宽度 640", _PILImage.open(it_z.path).width == 640)
+    check("center-crop 分配 .jpg", it_z.key == "image/photo.jpg" and it_z.kind == "image")
+    out = ingest_image(media_img2, it_z.path, size=224)
+    check("center-crop 输出与条目一致", out == it_z.path and it_z.path.is_file())
+    check("输出为 224×224 正方形", _PILImage.open(it_z.path).size == (224, 224))
     check("manifest dir 为 .jpg", namer_z.manifest[str(media_img2)]["dir"] == "image/photo.jpg")
     check("manifest ext 记录源扩展名", namer_z.manifest[str(media_img2)]["ext"] == ".png")
     namer_z.save()
     check("resolve 闭环（命中 manifest）", resolve_item(media_img2, frames_root).key == "image/photo.jpg")
-    check("scan 收录缩放条目", "image/photo.jpg" in [i.key for i in MediaItem.scan(frames_root)])
+    check("scan 收录条目", "image/photo.jpg" in [i.key for i in MediaItem.scan(frames_root)])
 
     print("== labeling.build_queue_from_frames ==")
     queue = build_queue_from_frames(frames_root)
@@ -206,7 +206,7 @@ def _run_checks(root: Path) -> None:
     handlers = _make_ingest_handlers(
         sampling="uniform", scene_threshold=0.3, fps_target=0.5,
         min_frames=2, max_frames=8, black_threshold=10, white_threshold=245,
-        max_width=640, image_max_width=0, hwaccel=None,
+        size=640, image_size=0, hwaccel=None,
     )
     check("分派表含 video/image", set(handlers) == {"video", "image"})
     src_img = root / "pic.png"
